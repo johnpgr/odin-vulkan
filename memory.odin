@@ -23,6 +23,11 @@ Game_Memory_API :: struct {
 	frame: ^mem.Allocator,
 }
 
+Frame_Temp :: struct {
+	allocator: mem.Allocator,
+	temp:      mem.Arena_Temp_Memory,
+}
+
 app_memory_backing_buffer: [APP_MEMORY_SIZE]byte
 frame_memory_backing_buffer: [FRAME_MEMORY_SIZE]byte
 
@@ -63,15 +68,20 @@ memory_system_api :: proc(ms: ^Memory_System) -> Game_Memory_API {
 	return Game_Memory_API{app = &ms.app_allocator, frame = &ms.frame_allocator}
 }
 
-memory_begin_frame_temp :: proc(ms: ^Memory_System) -> mem.Arena_Temp_Memory {
+memory_begin_frame_temp :: proc(ms: ^Memory_System) -> Frame_Temp {
 	if ms == nil || !ms.initialized {
 		return {}
 	}
-	return mem.begin_arena_temp_memory(&ms.frame_arena)
+
+	return Frame_Temp {
+		allocator = ms.frame_allocator,
+		temp      = mem.begin_arena_temp_memory(&ms.frame_arena),
+	}
 }
 
-memory_end_frame_temp :: proc(tmp: mem.Arena_Temp_Memory) {
-	if tmp.arena != nil {
-		mem.end_arena_temp_memory(tmp)
+memory_end_frame_temp :: proc(frame: ^Frame_Temp) {
+	if frame != nil && frame.temp.arena != nil {
+		mem.end_arena_temp_memory(frame.temp)
+		frame^ = {}
 	}
 }
