@@ -1,5 +1,6 @@
 package main
 
+import "core:mem"
 import glfw "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -296,13 +297,251 @@ instance_extension_available :: proc(name: cstring) -> bool {
 	return false
 }
 
+SwapchainContext :: struct {
+	handle:       vk.SwapchainKHR,
+	images:       []vk.Image,
+	image_views:  []vk.ImageView,
+	image_format: vk.Format,
+	extent:       vk.Extent2D,
+}
+
+// Query the surface capabilities to decide the
+// image format, resolution, and present mode
+// then create the swap chain.
+create_swapchain_context :: proc(
+	device: vk.Device,
+	physical_device: vk.PhysicalDevice,
+	surface: vk.SurfaceKHR,
+	indices: QueueFamilyIndices,
+	swapchain_allocator: mem.Allocator,
+) -> (
+	SwapchainContext,
+	bool,
+) {
+	// Get the capabilities
+	capabilities: vk.SurfaceCapabilitiesKHR
+	if vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &capabilities) !=
+	   .SUCCESS {
+		return {}, false
+	}
+
+	// Get the formats
+	format_count: u32 = 0
+	if vk.GetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &format_count, nil) !=
+	   .SUCCESS {
+		return {}, false
+	}
+
+	formats := make([]vk.SurfaceFormatKHR, int(format_count), context.temp_allocator)
+	defer delete(formats, context.temp_allocator)
+
+	if vk.GetPhysicalDeviceSurfaceFormatsKHR(
+		   physical_device,
+		   surface,
+		   &format_count,
+		   raw_data(formats),
+	   ) !=
+	   .SUCCESS {
+		return {}, false
+	}
+
+	// Get the present modes
+	present_mode_count: u32 = 0
+	if vk.GetPhysicalDeviceSurfacePresentModesKHR(
+		   physical_device,
+		   surface,
+		   &present_mode_count,
+		   nil,
+	   ) !=
+	   .SUCCESS {
+		return {}, false
+	}
+
+	present_modes := make([]vk.PresentModeKHR, int(present_mode_count), context.temp_allocator)
+	defer delete(present_modes, context.temp_allocator)
+
+	if vk.GetPhysicalDeviceSurfacePresentModesKHR(
+		   physical_device,
+		   surface,
+		   &present_mode_count,
+		   raw_data(present_modes),
+	   ) !=
+	   .SUCCESS {
+		return {}, false
+	}
+
+	// Choose a surface format - prefer SRGB w/ B8G8R8A8 layout
+	chosen_format := formats[0] // fallback
+	for f in formats {
+		if f.format == .B8G8R8A8_SRGB && f.colorSpace == .SRGB_NONLINEAR {
+			chosen_format = f
+			break
+		}
+	}
+
+	// Choose present mode - prefer mailbox (triple buffering) if available
+	chosen_present_mode: vk.PresentModeKHR = .FIFO
+	for p in present_modes {
+		if p == .MAILBOX {
+			chosen_present_mode = p
+			break
+		}
+	}
+
+	// Choose extent (resolution)
+	swap_extent := capabilities.currentExtent
+
+	// Request one more image than the minimum for smooth operation
+	image_count := capabilities.minImageCount + 1
+	if capabilities.maxImageCount > 0 && image_count > capabilities.maxImageCount {
+		image_count = capabilities.maxImageCount
+	}
+
+	swapchain_create_info := vk.SwapchainCreateInfoKHR {
+		sType            = .SWAPCHAIN_CREATE_INFO_KHR,
+		// Target window surface the swapchain presents to.
+		surface          = surface,
+		// Number of images to keep in the swapchain.
+		minImageCount    = image_count,
+		// Pixel format of swapchain images.
+		imageFormat      = chosen_format.format,
+		// Color space used for presentation output.
+		imageColorSpace  = chosen_format.colorSpace,
+		// Resolution of each swapchain image.
+		imageExtent      = swap_extent,
+		// Layers per image (1 for regular 2D rendering).
+		imageArrayLayers = 1,
+		// Intended usage of swapchain images.
+		imageUsage       = {.COLOR_ATTACHMENT},
+		// Queue ownership mode for image access.
+		imageSharingMode = .EXCLUSIVE,
+		// Transform applied when presenting (e.g., rotation).
+		preTransform     = capabilities.currentTransform,
+		// How alpha is blended with the window system.
+		compositeAlpha   = {.OPAQUE},
+		// Presentation pacing strategy (vsync/latency behavior).
+		presentMode      = chosen_present_mode,
+		// Ignore rendering to pixels hidden by other windows.
+		clipped          = true,
+	}
+
+	if indices.graphics_family != indices.present_family {
+		family_indices := []u32{indices.graphics_family, indices.present_family}
+		swapchain_create_info.imageSharingMode = .CONCURRENT
+		swapchain_create_info.queueFamilyIndexCount = 2
+		swapchain_create_info.pQueueFamilyIndices = raw_data(family_indices)
+	}
+
+	swapchain: vk.SwapchainKHR
+	if vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &swapchain) != .SUCCESS {
+		return {}, false
+	}
+
+	swapchain_image_count: u32 = 0
+	if vk.GetSwapchainImagesKHR(device, swapchain, &swapchain_image_count, nil) != .SUCCESS {
+		vk.DestroySwapchainKHR(device, swapchain, nil)
+		return {}, false
+	}
+
+	swapchain_images := make([]vk.Image, int(swapchain_image_count), swapchain_allocator)
+	if vk.GetSwapchainImagesKHR(
+		   device,
+		   swapchain,
+		   &swapchain_image_count,
+		   raw_data(swapchain_images),
+	   ) !=
+	   .SUCCESS {
+		vk.DestroySwapchainKHR(device, swapchain, nil)
+		return {}, false
+	}
+
+	swapchain_image_views := make([]vk.ImageView, len(swapchain_images), swapchain_allocator)
+	created_image_views := 0
+
+	for image in swapchain_images {
+		view_create_info := vk.ImageViewCreateInfo {
+			sType = .IMAGE_VIEW_CREATE_INFO,
+			image = image,
+			viewType = .D2,
+			format = chosen_format.format,
+			components = {.IDENTITY, .IDENTITY, .IDENTITY, .IDENTITY},
+			subresourceRange = {
+				aspectMask = {.COLOR},
+				baseMipLevel = 0,
+				levelCount = 1,
+				baseArrayLayer = 0,
+				layerCount = 1,
+			},
+		}
+
+		image_view: vk.ImageView
+		if vk.CreateImageView(device, &view_create_info, nil, &image_view) != .SUCCESS {
+			for created_index in 0 ..< created_image_views {
+				vk.DestroyImageView(device, swapchain_image_views[created_index], nil)
+			}
+			vk.DestroySwapchainKHR(device, swapchain, nil)
+			return {}, false
+		}
+		swapchain_image_views[created_image_views] = image_view
+		created_image_views += 1
+	}
+
+	swapchain_context := SwapchainContext {
+		handle       = swapchain,
+		images       = swapchain_images,
+		image_views  = swapchain_image_views,
+		image_format = chosen_format.format,
+		extent       = swap_extent,
+	}
+	return swapchain_context, true
+}
+
+destroy_swapchain_context :: proc(device: vk.Device, swapchain_context: ^SwapchainContext) {
+	if len(swapchain_context.image_views) > 0 {
+		for image_view in swapchain_context.image_views {
+			vk.DestroyImageView(device, image_view, nil)
+		}
+	}
+	if len(swapchain_context.images) > 0 {
+		vk.DestroySwapchainKHR(device, swapchain_context.handle, nil)
+	}
+	swapchain_context^ = {}
+}
+
+recreate_swapchain :: proc(
+	device: vk.Device,
+	physical_device: vk.PhysicalDevice,
+	surface: vk.SurfaceKHR,
+	indices: QueueFamilyIndices,
+	swapchain_allocator: mem.Allocator,
+	swapchain_context: ^SwapchainContext,
+) -> bool {
+	vk.DeviceWaitIdle(device)
+	destroy_swapchain_context(device, swapchain_context)
+	swapchain_memory_reset(swapchain_allocator)
+
+	new_swapchain_context, ok_swapchain := create_swapchain_context(
+		device,
+		physical_device,
+		surface,
+		indices,
+		swapchain_allocator,
+	)
+	if !ok_swapchain {
+		return false
+	}
+
+	swapchain_context^ = new_swapchain_context
+	return true
+}
+
 // To render the initial triangle w/ Vulkan:
 // 1. get the vkInstance [x]
 // 2. query it to get a vkPhysicalDevice [x]
 // 3. create a vkDevice (logical device) [x]
-// 4. specify which queue families to use [ ]
-// 5. window (glfw)
-// 6. vkSurfaceKHR & vkSwapchainKHR [KHR -> extension postfix]
+// 4. specify which queue families to use [x]
+// 5. window (glfw) [x]
+// 6. vkSurfaceKHR & vkSwapchainKHR [KHR -> extension postfix] [ ]
 // - Send the window handle from the OS to the vulkan api (WSI - Window System Interface)
 // swap chain -> collection of render targets
 main :: proc() {
@@ -362,9 +601,8 @@ main :: proc() {
 	}
 
 	instance: vk.Instance
-	res_instance := vk.CreateInstance(&create_info, nil, &instance)
-	if res_instance != .SUCCESS {
-		log_error("vkCreateInstance failed:", res_instance)
+	if vk.CreateInstance(&create_info, nil, &instance) != .SUCCESS {
+		log_error("vkCreateInstance failed")
 		return
 	}
 	defer vk.DestroyInstance(instance, nil)
@@ -380,26 +618,54 @@ main :: proc() {
 	log_infof("Selected physical device %s", device_name)
 
 	// Create the window
+	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
+	glfw.WindowHint(glfw.RESIZABLE, glfw.TRUE)
 	window := glfw.CreateWindow(1280, 720, "Learning Vulkan", nil, nil)
 	if window == nil {
 		log_error("Failed to create a window")
 		return
 	}
+	defer glfw.DestroyWindow(window)
 
 	surface: vk.SurfaceKHR
-	res_surface := glfw.CreateWindowSurface(instance, window, nil, &surface)
-	if res_surface != .SUCCESS {
-		log_error("glfw.CreateWindowSurface failed:", res_surface)
+	if glfw.CreateWindowSurface(instance, window, nil, &surface) != .SUCCESS {
+		log_error("glfw.CreateWindowSurface failed")
 		return
 	}
+	defer vk.DestroySurfaceKHR(instance, surface, nil)
 
-	device_and_queue, ok_device_queue := create_gpu_context(physical_device, surface)
-	if !ok_device_queue {
+	gpu_context, ok_gpu_context := create_gpu_context(physical_device, surface)
+	if !ok_gpu_context {
 		log_error("Failed to create logical device")
 		return
 	}
-	defer vk.DestroyDevice(device_and_queue.device, nil)
+	defer vk.DestroyDevice(gpu_context.device, nil)
 
-	log_infof("Logical device created, graphics family=%d", device_and_queue.family_index)
-	_ = device_and_queue.queue
+	queue_family_indices, ok_queue_families := find_queue_families(physical_device, surface)
+	if !ok_queue_families {
+		log_error("Failed to find swapchain queue families")
+		return
+	}
+
+	swapchain_allocator := swapchain_memory_init()
+	swapchain_context, ok_swapchain := create_swapchain_context(
+		gpu_context.device,
+		physical_device,
+		surface,
+		queue_family_indices,
+		swapchain_allocator,
+	)
+	if !ok_swapchain {
+		swapchain_memory_reset(swapchain_allocator)
+		log_error("Failed to create swapchain context")
+		return
+	}
+	defer {
+		vk.DeviceWaitIdle(gpu_context.device)
+		destroy_swapchain_context(gpu_context.device, &swapchain_context)
+		swapchain_memory_reset(swapchain_allocator)
+	}
+
+	log_infof("Logical device created, graphics family=%d", gpu_context.graphics_family_index)
+	log_infof("Swapchain created with %d images", len(swapchain_context.images))
 }
