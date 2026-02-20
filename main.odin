@@ -1,10 +1,13 @@
 package main
 
 import vk "vendor:vulkan"
+import glfw "vendor:glfw"
 
 when ODIN_OS == .Windows {
 	foreign import vulkan "system:vulkan-1.lib"
 } else when ODIN_OS == .Linux {
+	foreign import vulkan "system:vulkan"
+} else when ODIN_OS == .Darwin {
 	foreign import vulkan "system:vulkan"
 }
 
@@ -17,8 +20,8 @@ foreign vulkan {
 
 // To render the initial triangle w/ Vulkan:
 // 1. get the vkInstance [x]
-// 2. query it to get a vkPhysicalDevice [ ]
-// 3. vkDevice (logical device)
+// 2. query it to get a vkPhysicalDevice [x]
+// 3. vkDevice (logical device) [ ]
 // 4. window (glfw)
 // 5. vkSurfaceKHR & vkSwapchainKHR [KHR -> extension postfix]
 // - Send the window handle from the OS to the vulkan api (WSI - Window System Interface)
@@ -58,8 +61,10 @@ rate_device_suitability :: proc(device: vk.PhysicalDevice, ms: ^Memory_System) -
 	vk.GetPhysicalDeviceProperties(device, &props)
 	vk.GetPhysicalDeviceFeatures(device, &features)
 
-	if !features.geometryShader {
-		return 0
+	when ODIN_OS != .Darwin {
+		if !features.geometryShader {
+			return 0
+		}
 	}
 
 	if !has_graphics_queue_family(device, ms) {
@@ -116,10 +121,56 @@ pick_physical_device :: proc(
 	return best_device, true
 }
 
+has_extension_name :: proc(exts: []cstring, target: cstring) -> bool {
+	target_name := string(target)
+	for ext in exts {
+		if ext != nil && string(ext) == target_name {
+			return true
+		}
+	}
+	return false
+}
+
+instance_extension_available :: proc(name: cstring, ms: ^Memory_System) -> bool {
+	count: u32 = 0
+	if vk.EnumerateInstanceExtensionProperties(nil, &count, nil) != .SUCCESS || count == 0 {
+		return false
+	}
+
+	frame := memory_begin_frame_temp(ms)
+	defer memory_end_frame_temp(&frame)
+
+	props := make([]vk.ExtensionProperties, int(count), frame.allocator)
+	if vk.EnumerateInstanceExtensionProperties(nil, &count, raw_data(props)) != .SUCCESS {
+		return false
+	}
+
+	name_str := string(name)
+	for i in 0..<int(count) {
+		ext_name := string(cast(cstring)&props[i].extensionName[0])
+		if ext_name == name_str {
+			return true
+		}
+	}
+
+	return false
+}
+
 main :: proc() {
 	ms: Memory_System
 	memory_system_initialize(&ms)
 	defer memory_system_shutdown(&ms)
+
+	if !glfw.Init() {
+		log_error("glfwInit failed")
+		return
+	}
+	defer glfw.Terminate()
+
+	if !glfw.VulkanSupported() {
+		log_error("GLFW reports Vulkan unsupported")
+		return
+	}
 
 	vk.load_proc_addresses_global(cast(rawptr)vk_get_instance_proc_addr)
 
@@ -132,13 +183,35 @@ main :: proc() {
 		apiVersion         = vk.API_VERSION_1_4,
 	}
 
-	exts := []cstring {
-		"VK_KHR_surface",
-		"VK_KHR_win32_surface", // Windows; for GLFW use its required extensions
+	required_exts := glfw.GetRequiredInstanceExtensions()
+	if len(required_exts) == 0 {
+		log_error("GLFW returned no Vulkan instance extensions")
+		return
+	}
+
+	portability_ext: cstring = vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
+	enable_portability := instance_extension_available(portability_ext, &ms)
+	append_portability_name := enable_portability && !has_extension_name(required_exts, portability_ext)
+
+	ext_count := len(required_exts)
+	if append_portability_name {
+		ext_count += 1
+	}
+
+	exts := make([]cstring, ext_count)
+	copy(exts, required_exts)
+	if append_portability_name {
+		exts[len(required_exts)] = portability_ext
+	}
+
+	create_flags := vk.InstanceCreateFlags {}
+	if enable_portability {
+		create_flags = { .ENUMERATE_PORTABILITY_KHR }
 	}
 
 	create_info := vk.InstanceCreateInfo {
 		sType                   = .INSTANCE_CREATE_INFO,
+		flags                   = create_flags,
 		pApplicationInfo        = &app_info,
 		enabledExtensionCount   = u32(len(exts)),
 		ppEnabledExtensionNames = raw_data(exts),

@@ -8,6 +8,8 @@ local output_name = project_name .. (is_windows and ".exe" or "")
 local output_rel_path = joinpath("bin", output_name)
 local program_path = joinpath(project_root, output_rel_path)
 local uv = vim.uv or vim.loop
+local build_script_path = joinpath(project_root, "build.lua")
+local build_module
 
 local lldb_dap = vim.fn.exepath("lldb-dap")
 if lldb_dap == "" then
@@ -49,65 +51,40 @@ dap.configurations.odin = {
     },
 }
 
-local function get_build_command()
-    local function file_exists(path)
-        return uv.fs_stat(path) ~= nil
-    end
-
-    local function find_vulkan_lib_dir(vulkan_sdk)
-        local candidates = {
-            joinpath(vulkan_sdk, "Lib"),
-            joinpath(vulkan_sdk, "Lib", "x64"),
-        }
-
-        for _, lib_dir in ipairs(candidates) do
-            if file_exists(joinpath(lib_dir, "vulkan-1.lib")) then
-                return lib_dir
-            end
-        end
-
-        return nil
-    end
-
-    local function quote_if_needed(path)
-        if path:find("%s") then
-            return '"' .. path .. '"'
-        end
-
-        return path
-    end
-
-    if is_windows then
-        local vulkan_sdk = vim.env.VULKAN_SDK
-        if not vulkan_sdk or vulkan_sdk == "" then
-            return nil, "VULKAN_SDK is not set"
-        end
-
-        local vulkan_lib_path = find_vulkan_lib_dir(vulkan_sdk)
-        if not vulkan_lib_path then
-            return nil, "Could not find vulkan-1.lib under VULKAN_SDK"
-        end
-
-        return {
-            "odin",
-            "build",
-            ".",
-            "-debug",
-            "-subsystem:windows",
-            "-out:" .. output_rel_path,
-            "-extra-linker-flags:/LIBPATH:" .. quote_if_needed(vulkan_lib_path),
-        }
-    end
-
-    return { "odin", "build", ".", "-debug", "-out:" .. output_rel_path }
-end
-
-local function build_command_to_string(build_cmd)
+local function command_to_string(cmd)
     local escaped = {}
-    for _, part in ipairs(build_cmd) do
+    for _, part in ipairs(cmd) do
         table.insert(escaped, vim.fn.shellescape(part))
     end
     return table.concat(escaped, " ")
+end
+
+local function get_build_module()
+    if build_module then
+        return build_module
+    end
+
+    if uv.fs_stat(build_script_path) == nil then
+        return nil, "build.lua not found in project root"
+    end
+
+    local build_module_path = joinpath(project_root, "?.lua")
+    if not package.path:find(build_module_path, 1, true) then
+        package.path = build_module_path .. ";" .. package.path
+    end
+
+    package.loaded.build = nil
+    local ok, mod = pcall(require, "build")
+    if not ok then
+        return nil, "Failed loading build.lua: " .. mod
+    end
+
+    if type(mod) ~= "table" or type(mod.get_build_command) ~= "function" then
+        return nil, "build.lua must return table with get_build_command()"
+    end
+
+    build_module = mod
+    return build_module
 end
 
 local function build_and_debug()
@@ -118,9 +95,15 @@ local function build_and_debug()
 
     vim.cmd("wall")
     vim.notify("Building app...")
-    vim.fn.mkdir(joinpath(project_root, "bin"), "p")
 
-    local build_cmd, build_error = get_build_command()
+    local build, build_module_error = get_build_module()
+    if not build then
+        vim.notify(build_module_error, vim.log.levels.ERROR)
+        return
+    end
+
+    vim.fn.mkdir(joinpath(project_root, "bin"), "p")
+    local build_cmd, build_error = build.get_build_command(project_root)
     if not build_cmd then
         vim.notify(build_error, vim.log.levels.ERROR)
         return
@@ -140,6 +123,67 @@ local function build_and_debug()
     end)
 end
 
+local function open_run_terminal(cmd_array)
+    vim.cmd("botright new")
+    vim.bo.bufhidden = "wipe"
+    vim.bo.swapfile = false
+
+    local job_id = vim.fn.jobstart(cmd_array, {
+        cwd = project_root,
+        term = true,
+        on_exit = function(_, code)
+            if code ~= 0 then
+                vim.schedule(function()
+                    vim.notify("Run exited with code: " .. code, vim.log.levels.WARN)
+                end)
+            end
+        end,
+    })
+
+    if job_id <= 0 then
+        vim.notify("Failed to start app process", vim.log.levels.ERROR)
+        return
+    end
+
+    vim.cmd("startinsert")
+end
+
+local function build_and_run()
+    vim.cmd("wall")
+    vim.notify("Building app...")
+
+    local build, build_module_error = get_build_module()
+    if not build then
+        vim.notify(build_module_error, vim.log.levels.ERROR)
+        return
+    end
+
+    vim.fn.mkdir(joinpath(project_root, "bin"), "p")
+    local build_cmd, build_error = build.get_build_command(project_root)
+    if not build_cmd then
+        vim.notify(build_error, vim.log.levels.ERROR)
+        return
+    end
+
+    vim.system(build_cmd, { cwd = project_root, text = true }, function(res)
+        vim.schedule(function()
+            if res.code ~= 0 then
+                local output = (res.stderr and res.stderr ~= "") and res.stderr or (res.stdout or "")
+                vim.notify("Build failed:\n" .. output, vim.log.levels.ERROR)
+                return
+            end
+
+            if uv.fs_stat(program_path) == nil then
+                vim.notify("Build succeeded but executable not found: " .. program_path, vim.log.levels.ERROR)
+                return
+            end
+
+            vim.notify("Build succeeded. Running app...")
+            open_run_terminal({ program_path })
+        end)
+    end)
+end
+
 local function build_with_compile_mode()
     if vim.fn.exists(":Compile") == 0 then
         vim.notify("compile-mode.nvim is not available (:Compile missing)", vim.log.levels.ERROR)
@@ -147,15 +191,21 @@ local function build_with_compile_mode()
     end
 
     vim.cmd("wall")
-    vim.fn.mkdir(joinpath(project_root, "bin"), "p")
 
-    local build_cmd, build_error = get_build_command()
+    local build, build_module_error = get_build_module()
+    if not build then
+        vim.notify(build_module_error, vim.log.levels.ERROR)
+        return
+    end
+
+    vim.fn.mkdir(joinpath(project_root, "bin"), "p")
+    local build_cmd, build_error = build.get_build_command(project_root)
     if not build_cmd then
         vim.notify(build_error, vim.log.levels.ERROR)
         return
     end
 
-    vim.cmd("Compile " .. build_command_to_string(build_cmd))
+    vim.cmd("Compile " .. command_to_string(build_cmd))
 end
 
 local function stop_debug_session()
@@ -170,6 +220,11 @@ end
 
 vim.keymap.set("n", "<leader>de", build_and_debug, {
     desc = "Build + debug app",
+    silent = true,
+})
+
+vim.keymap.set("n", "<leader>dr", build_and_run, {
+    desc = "Build + run app",
     silent = true,
 })
 
