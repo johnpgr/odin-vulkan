@@ -1,6 +1,5 @@
 package main
 
-import "core:fmt"
 import glfw "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -18,33 +17,64 @@ foreign vulkan {
 	vkGetInstanceProcAddr :: proc(instance: vk.Instance, pName: cstring) -> vk.ProcVoidFunction ---
 }
 
-find_graphics_queue_family :: proc(device: vk.PhysicalDevice) -> (u32, bool) {
+QueueFamilyIndices :: struct {
+	graphics_family: u32,
+	present_family:  u32,
+}
+
+find_queue_families :: proc(
+	device: vk.PhysicalDevice,
+	surface: vk.SurfaceKHR,
+) -> (
+	QueueFamilyIndices,
+	bool,
+) {
+	// First we get the count
 	queue_family_count: u32 = 0
 	vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nil)
 	if queue_family_count == 0 {
-		return 0, false
+		return {}, false
 	}
 
+	// Make the empty array with the count
 	queue_families := make(
 		[]vk.QueueFamilyProperties,
 		int(queue_family_count),
 		context.temp_allocator,
 	)
 	defer delete(queue_families, context.temp_allocator)
+
+	// Then we pass the array ptr to populate it..
 	vk.GetPhysicalDeviceQueueFamilyProperties(
 		device,
 		&queue_family_count,
 		raw_data(queue_families),
 	)
 
+	families := QueueFamilyIndices{}
+	found_gfx, found_present := false, false
+
+	// Then we loop it to get the families idxs
 	for i in 0 ..< int(queue_family_count) {
 		q := queue_families[i]
-		if q.queueCount > 0 && (.GRAPHICS in q.queueFlags) {
-			return u32(i), true
+		if q.queueCount > 0 {
+			if .GRAPHICS in q.queueFlags {
+				families.graphics_family = u32(i)
+				found_gfx = true
+			}
+
+			if vk.GetPhysicalDeviceSurfaceSupportKHR(device, u32(i), surface, nil) == .SUCCESS {
+				families.present_family = u32(i)
+				found_present = true
+			}
 		}
 	}
 
-	return 0, false
+	if !found_gfx || !found_present {
+		return {}, false
+	}
+
+	return families, true
 }
 
 device_extension_available :: proc(device: vk.PhysicalDevice, name: cstring) -> bool {
@@ -71,42 +101,75 @@ device_extension_available :: proc(device: vk.PhysicalDevice, name: cstring) -> 
 }
 
 GpuContext :: struct {
-	device:       vk.Device,
-	queue:        vk.Queue,
-	family_index: u32,
+	device:                vk.Device,
+	graphics_queue:        vk.Queue,
+	graphics_family_index: u32,
+	present_queue:         vk.Queue,
+	present_family_index:  u32,
 }
 
-create_gpu_context :: proc(physical_device: vk.PhysicalDevice) -> (GpuContext, bool) {
-	graphics_family_index, ok := find_graphics_queue_family(physical_device)
+create_gpu_context :: proc(
+	physical_device: vk.PhysicalDevice,
+	surface: vk.SurfaceKHR,
+) -> (
+	GpuContext,
+	bool,
+) {
+	queue_families, ok := find_queue_families(physical_device, surface)
 	if !ok {
 		return {}, false
 	}
 
 	queue_priority: f32 = 1.0
-	queue_info := vk.DeviceQueueCreateInfo {
-		sType            = .DEVICE_QUEUE_CREATE_INFO,
-		queueFamilyIndex = graphics_family_index,
-		queueCount       = 1,
-		pQueuePriorities = &queue_priority,
+	queue_create_infos := [2]vk.DeviceQueueCreateInfo {
+		{
+			sType = .DEVICE_QUEUE_CREATE_INFO,
+			queueFamilyIndex = queue_families.graphics_family,
+			queueCount = 1,
+			pQueuePriorities = &queue_priority,
+		},
+		{
+			sType = .DEVICE_QUEUE_CREATE_INFO,
+			queueFamilyIndex = queue_families.present_family,
+			queueCount = 1,
+			pQueuePriorities = &queue_priority,
+		},
 	}
 
+	// Specify the device extensions we need (swapchain is essencial for rendering)
+	device_extensions := make([dynamic]cstring, context.temp_allocator)
+
+	if device_extension_available(physical_device, vk.KHR_SWAPCHAIN_EXTENSION_NAME) {
+		append(&device_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+	}
+
+	if device_extension_available(physical_device, vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME) {
+		append(&device_extensions, vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME)
+	}
+
+
+	// Specify which physical device features we'll use
+	// For a basic triangle, we leave everything at defaults (disabled)
 	device_features := vk.PhysicalDeviceFeatures{}
 
-	enabled_ext_count: u32 = 0
-	enabled_ext_ptr: ^cstring = nil
-	portability_subset: cstring = vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME
-	if device_extension_available(physical_device, portability_subset) {
-		enabled_ext_count = 1
-		enabled_ext_ptr = &portability_subset
+	// For Vulkan 1.3 features like dynamic rendering, chain a features struct
+	dynamic_rendering_feature := vk.PhysicalDeviceDynamicRenderingFeatures {
+		dynamicRendering = true,
+	}
+
+	features2 := vk.PhysicalDeviceFeatures2 {
+		sType    = .PHYSICAL_DEVICE_FEATURES_2,
+		pNext    = &dynamic_rendering_feature,
+		features = device_features,
 	}
 
 	create_info := vk.DeviceCreateInfo {
 		sType                   = .DEVICE_CREATE_INFO,
-		queueCreateInfoCount    = 1,
-		pQueueCreateInfos       = &queue_info,
-		pEnabledFeatures        = &device_features,
-		enabledExtensionCount   = enabled_ext_count,
-		ppEnabledExtensionNames = enabled_ext_ptr,
+		pNext                   = &features2,
+		queueCreateInfoCount    = len(queue_create_infos),
+		pQueueCreateInfos       = raw_data(queue_create_infos[:]),
+		enabledExtensionCount   = u32(len(device_extensions)),
+		ppEnabledExtensionNames = raw_data(device_extensions[:]),
 	}
 
 	device: vk.Device
@@ -117,10 +180,19 @@ create_gpu_context :: proc(physical_device: vk.PhysicalDevice) -> (GpuContext, b
 
 	vk.load_proc_addresses_device(device)
 
-	graphics_queue: vk.Queue
-	vk.GetDeviceQueue(device, graphics_family_index, 0, &graphics_queue)
+	graphics_queue, present_queue: vk.Queue
+	vk.GetDeviceQueue(device, queue_families.graphics_family, 0, &graphics_queue)
+	vk.GetDeviceQueue(device, queue_families.present_family, 0, &present_queue)
 
-	return {device, graphics_queue, graphics_family_index}, true
+	gpu_context := GpuContext {
+		device                = device,
+		graphics_queue        = graphics_queue,
+		graphics_family_index = queue_families.graphics_family,
+		present_queue         = present_queue,
+		present_family_index  = queue_families.present_family,
+	}
+
+	return gpu_context, true
 }
 
 has_graphics_queue_family :: proc(device: vk.PhysicalDevice) -> bool {
@@ -152,63 +224,42 @@ has_graphics_queue_family :: proc(device: vk.PhysicalDevice) -> bool {
 	return false
 }
 
-rate_device_suitability :: proc(device: vk.PhysicalDevice) -> int {
-	props: vk.PhysicalDeviceProperties
-	features: vk.PhysicalDeviceFeatures
-
-	vk.GetPhysicalDeviceProperties(device, &props)
-	vk.GetPhysicalDeviceFeatures(device, &features)
-
-	when ODIN_OS != .Darwin {
-		if !features.geometryShader {
-			return 0
-		}
-	}
-
-	if !has_graphics_queue_family(device) {
-		return 0
-	}
-
-	score := int(props.limits.maxImageDimension2D)
-	if props.deviceType == .DISCRETE_GPU {
-		score += 1000
-	}
-
-	return score
-}
-
-pick_physical_device :: proc(instance: vk.Instance) -> (vk.PhysicalDevice, bool) {
+pick_physical_device :: proc(
+	instance: vk.Instance,
+) -> (
+	vk.PhysicalDevice,
+	vk.PhysicalDeviceProperties,
+	bool,
+) {
 	device_count: u32 = 0
-
 	if vk.EnumeratePhysicalDevices(instance, &device_count, nil) != .SUCCESS || device_count == 0 {
-		return {}, false
+		return {}, {}, false
 	}
 
 	devices := make([]vk.PhysicalDevice, int(device_count), context.temp_allocator)
 	defer delete(devices, context.temp_allocator)
 
 	if vk.EnumeratePhysicalDevices(instance, &device_count, raw_data(devices)) != .SUCCESS {
-		return {}, false
+		return {}, {}, false
 	}
 
 	best_score := -1
-	best_device: vk.PhysicalDevice
-	found := false
+	device: vk.PhysicalDevice = nil
+	props: vk.PhysicalDeviceProperties
 
 	for d in devices {
-		score := rate_device_suitability(d)
-		if score > best_score {
-			best_score = score
-			best_device = d
-			found = true
+		vk.GetPhysicalDeviceProperties(d, &props)
+		if props.deviceType == .DISCRETE_GPU {
+			device = d
+			break
 		}
 	}
 
-	if !found || best_score <= 0 {
-		return {}, false
+	if device == nil {
+		return {}, {}, false
 	}
 
-	return best_device, true
+	return device, props, true
 }
 
 has_extension_name :: proc(exts: []cstring, target: cstring) -> bool {
@@ -311,27 +362,38 @@ main :: proc() {
 	}
 
 	instance: vk.Instance
-	res := vk.CreateInstance(&create_info, nil, &instance)
-	if res != .SUCCESS {
-		log_error("vkCreateInstance failed:", res)
+	res_instance := vk.CreateInstance(&create_info, nil, &instance)
+	if res_instance != .SUCCESS {
+		log_error("vkCreateInstance failed:", res_instance)
 		return
 	}
 	defer vk.DestroyInstance(instance, nil)
 	vk.load_proc_addresses_instance(instance)
 
-	physical_device, ok := pick_physical_device(instance)
-	if !ok {
+	physical_device, physical_device_props, ok_physical_device := pick_physical_device(instance)
+	if !ok_physical_device {
 		log_error("Failed to find a suitable GPU device")
 		return
 	}
 
-	// Log out the phisycal device info
-	props: vk.PhysicalDeviceProperties
-	vk.GetPhysicalDeviceProperties(physical_device, &props)
-	device_name := string(cast(cstring)&props.deviceName[0])
+	device_name := string(cast(cstring)&physical_device_props.deviceName[0])
 	log_infof("Selected physical device %s", device_name)
 
-	device_and_queue, ok_device_queue := create_gpu_context(physical_device)
+	// Create the window
+	window := glfw.CreateWindow(1280, 720, "Learning Vulkan", nil, nil)
+	if window == nil {
+		log_error("Failed to create a window")
+		return
+	}
+
+	surface: vk.SurfaceKHR
+	res_surface := glfw.CreateWindowSurface(instance, window, nil, &surface)
+	if res_surface != .SUCCESS {
+		log_error("glfw.CreateWindowSurface failed:", res_surface)
+		return
+	}
+
+	device_and_queue, ok_device_queue := create_gpu_context(physical_device, surface)
 	if !ok_device_queue {
 		log_error("Failed to create logical device")
 		return
