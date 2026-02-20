@@ -1,7 +1,7 @@
 package main
 
-import vk "vendor:vulkan"
 import glfw "vendor:glfw"
+import vk "vendor:vulkan"
 
 when ODIN_OS == .Windows {
 	foreign import vulkan "system:vulkan-1.lib"
@@ -14,18 +14,123 @@ when ODIN_OS == .Windows {
 @(default_calling_convention = "system")
 foreign vulkan {
 	@(link_name = "vkGetInstanceProcAddr")
-	vk_get_instance_proc_addr :: proc(instance: vk.Instance, pName: cstring) -> vk.ProcVoidFunction ---
+	vkGetInstanceProcAddr :: proc(instance: vk.Instance, pName: cstring) -> vk.ProcVoidFunction ---
 }
 
+find_graphics_queue_family :: proc(device: vk.PhysicalDevice, ms: ^Memory_System) -> (u32, bool) {
+	frame := memory_begin_frame_temp(ms)
+	defer memory_end_frame_temp(&frame)
 
-// To render the initial triangle w/ Vulkan:
-// 1. get the vkInstance [x]
-// 2. query it to get a vkPhysicalDevice [x]
-// 3. vkDevice (logical device) [ ]
-// 4. window (glfw)
-// 5. vkSurfaceKHR & vkSwapchainKHR [KHR -> extension postfix]
-// - Send the window handle from the OS to the vulkan api (WSI - Window System Interface)
-// swap chain -> collection of render targets
+	queue_family_count: u32 = 0
+	vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nil)
+	if queue_family_count == 0 {
+		return 0, false
+	}
+
+	queue_families := make([]vk.QueueFamilyProperties, int(queue_family_count), frame.allocator)
+	vk.GetPhysicalDeviceQueueFamilyProperties(
+		device,
+		&queue_family_count,
+		raw_data(queue_families),
+	)
+
+	for i in 0 ..< int(queue_family_count) {
+		q := queue_families[i]
+		if q.queueCount > 0 && (.GRAPHICS in q.queueFlags) {
+			return u32(i), true
+		}
+	}
+
+	return 0, false
+}
+
+device_extension_available :: proc(
+	device: vk.PhysicalDevice,
+	name: cstring,
+	ms: ^Memory_System,
+) -> bool {
+	count: u32 = 0
+	if vk.EnumerateDeviceExtensionProperties(device, nil, &count, nil) != .SUCCESS || count == 0 {
+		return false
+	}
+
+	frame := memory_begin_frame_temp(ms)
+	defer memory_end_frame_temp(&frame)
+
+	props := make([]vk.ExtensionProperties, int(count), frame.allocator)
+
+	if vk.EnumerateDeviceExtensionProperties(device, nil, &count, raw_data(props)) != .SUCCESS {
+		return false
+	}
+
+	target := string(name)
+	for i in 0 ..< int(count) {
+		ext_name := string(cast(cstring)&props[i].extensionName[0])
+		if ext_name == target {
+			return true
+		}
+	}
+	return false
+}
+
+Logical_Device_And_Queue :: struct {
+	device:       vk.Device,
+	queue:        vk.Queue,
+	family_index: u32,
+}
+
+create_logical_device_and_queue :: proc(
+	physical_device: vk.PhysicalDevice,
+	ms: ^Memory_System,
+) -> (
+	Logical_Device_And_Queue,
+	bool,
+) {
+	graphics_family_index, ok := find_graphics_queue_family(physical_device, ms)
+	if !ok {
+		return {}, false
+	}
+
+	queue_priority: f32 = 1.0
+	queue_info := vk.DeviceQueueCreateInfo {
+		sType            = .DEVICE_QUEUE_CREATE_INFO,
+		queueFamilyIndex = graphics_family_index,
+		queueCount       = 1,
+		pQueuePriorities = &queue_priority,
+	}
+
+	device_features := vk.PhysicalDeviceFeatures{}
+
+	enabled_ext_count: u32 = 0
+	enabled_ext_ptr: ^cstring = nil
+	portability_subset: cstring = vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME
+	if device_extension_available(physical_device, portability_subset, ms) {
+		enabled_ext_count = 1
+		enabled_ext_ptr = &portability_subset
+	}
+
+	create_info := vk.DeviceCreateInfo {
+		sType                   = .DEVICE_CREATE_INFO,
+		queueCreateInfoCount    = 1,
+		pQueueCreateInfos       = &queue_info,
+		pEnabledFeatures        = &device_features,
+		enabledExtensionCount   = enabled_ext_count,
+		ppEnabledExtensionNames = enabled_ext_ptr,
+	}
+
+	device: vk.Device
+
+	if vk.CreateDevice(physical_device, &create_info, nil, &device) != .SUCCESS {
+		return {}, false
+	}
+
+	vk.load_proc_addresses_device(device)
+
+	graphics_queue: vk.Queue
+	vk.GetDeviceQueue(device, graphics_family_index, 0, &graphics_queue)
+
+	return {device, graphics_queue, graphics_family_index}, true
+}
 
 has_graphics_queue_family :: proc(device: vk.PhysicalDevice, ms: ^Memory_System) -> bool {
 	frame := memory_begin_frame_temp(ms)
@@ -146,7 +251,7 @@ instance_extension_available :: proc(name: cstring, ms: ^Memory_System) -> bool 
 	}
 
 	name_str := string(name)
-	for i in 0..<int(count) {
+	for i in 0 ..< int(count) {
 		ext_name := string(cast(cstring)&props[i].extensionName[0])
 		if ext_name == name_str {
 			return true
@@ -156,6 +261,15 @@ instance_extension_available :: proc(name: cstring, ms: ^Memory_System) -> bool 
 	return false
 }
 
+// To render the initial triangle w/ Vulkan:
+// 1. get the vkInstance [x]
+// 2. query it to get a vkPhysicalDevice [x]
+// 3. create a vkDevice (logical device) [ ]
+// 4. specify which queue families to use [ ]
+// 5. window (glfw)
+// 6. vkSurfaceKHR & vkSwapchainKHR [KHR -> extension postfix]
+// - Send the window handle from the OS to the vulkan api (WSI - Window System Interface)
+// swap chain -> collection of render targets
 main :: proc() {
 	ms: Memory_System
 	memory_system_initialize(&ms)
@@ -172,7 +286,7 @@ main :: proc() {
 		return
 	}
 
-	vk.load_proc_addresses_global(cast(rawptr)vk_get_instance_proc_addr)
+	vk.load_proc_addresses_global(cast(rawptr)vkGetInstanceProcAddr)
 
 	app_info := vk.ApplicationInfo {
 		sType              = .APPLICATION_INFO,
@@ -191,7 +305,8 @@ main :: proc() {
 
 	portability_ext: cstring = vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
 	enable_portability := instance_extension_available(portability_ext, &ms)
-	append_portability_name := enable_portability && !has_extension_name(required_exts, portability_ext)
+	append_portability_name :=
+		enable_portability && !has_extension_name(required_exts, portability_ext)
 
 	ext_count := len(required_exts)
 	if append_portability_name {
@@ -204,9 +319,9 @@ main :: proc() {
 		exts[len(required_exts)] = portability_ext
 	}
 
-	create_flags := vk.InstanceCreateFlags {}
+	create_flags := vk.InstanceCreateFlags{}
 	if enable_portability {
-		create_flags = { .ENUMERATE_PORTABILITY_KHR }
+		create_flags = {.ENUMERATE_PORTABILITY_KHR}
 	}
 
 	create_info := vk.InstanceCreateInfo {
@@ -234,9 +349,19 @@ main :: proc() {
 		return
 	}
 
+    // Log out the phisycal device info
 	props: vk.PhysicalDeviceProperties
 	vk.GetPhysicalDeviceProperties(physical_device, &props)
-
 	device_name := string(cast(cstring)&props.deviceName[0])
 	log_infof("Selected physical device %s", device_name)
+
+    device_and_queue, ok_device_queue := create_logical_device_and_queue(physical_device, &ms)
+    if !ok_device_queue {
+        log_error("Failed to create logical device")
+        return
+    }
+    defer vk.DestroyDevice(device_and_queue.device, nil)
+
+    log_infof("Logical device created, graphics family=%d", device_and_queue.family_index)
+    _ = device_and_queue.queue
 }
