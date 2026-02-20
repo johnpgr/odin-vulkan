@@ -41,6 +41,7 @@ dap.configurations.odin = {
         name = "OdinGame (local)",
         type = "lldb",
         request = "launch",
+        console = "internalConsole",
         program = program_path,
         cwd = project_root,
         stopOnEntry = false,
