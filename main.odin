@@ -542,8 +542,7 @@ recreate_swapchain :: proc(
 // 4. specify which queue families to use [x]
 // 5. window (glfw) [x]
 // 6. vkSurfaceKHR & vkSwapchainKHR [KHR -> extension postfix] [ ]
-// - Send the window handle from the OS to the vulkan api (WSI - Window System Interface)
-// swap chain -> collection of render targets
+// 7. Graphics pipeline
 main :: proc() {
 	context.allocator, context.temp_allocator = memory_init()
 
