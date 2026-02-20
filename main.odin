@@ -17,7 +17,7 @@ foreign vulkan {
 	vkGetInstanceProcAddr :: proc(instance: vk.Instance, pName: cstring) -> vk.ProcVoidFunction ---
 }
 
-find_graphics_queue_family :: proc(device: vk.PhysicalDevice, ms: ^Memory_System) -> (u32, bool) {
+find_graphics_queue_family :: proc(device: vk.PhysicalDevice, ms: ^MemorySystem) -> (u32, bool) {
 	frame := memory_begin_frame_temp(ms)
 	defer memory_end_frame_temp(&frame)
 
@@ -47,7 +47,7 @@ find_graphics_queue_family :: proc(device: vk.PhysicalDevice, ms: ^Memory_System
 device_extension_available :: proc(
 	device: vk.PhysicalDevice,
 	name: cstring,
-	ms: ^Memory_System,
+	ms: ^MemorySystem,
 ) -> bool {
 	count: u32 = 0
 	if vk.EnumerateDeviceExtensionProperties(device, nil, &count, nil) != .SUCCESS || count == 0 {
@@ -73,7 +73,7 @@ device_extension_available :: proc(
 	return false
 }
 
-Logical_Device_And_Queue :: struct {
+LogicalDeviceAndQueue :: struct {
 	device:       vk.Device,
 	queue:        vk.Queue,
 	family_index: u32,
@@ -81,9 +81,9 @@ Logical_Device_And_Queue :: struct {
 
 create_logical_device_and_queue :: proc(
 	physical_device: vk.PhysicalDevice,
-	ms: ^Memory_System,
+	ms: ^MemorySystem,
 ) -> (
-	Logical_Device_And_Queue,
+	LogicalDeviceAndQueue,
 	bool,
 ) {
 	graphics_family_index, ok := find_graphics_queue_family(physical_device, ms)
@@ -132,7 +132,7 @@ create_logical_device_and_queue :: proc(
 	return {device, graphics_queue, graphics_family_index}, true
 }
 
-has_graphics_queue_family :: proc(device: vk.PhysicalDevice, ms: ^Memory_System) -> bool {
+has_graphics_queue_family :: proc(device: vk.PhysicalDevice, ms: ^MemorySystem) -> bool {
 	frame := memory_begin_frame_temp(ms)
 	defer memory_end_frame_temp(&frame)
 
@@ -159,7 +159,7 @@ has_graphics_queue_family :: proc(device: vk.PhysicalDevice, ms: ^Memory_System)
 	return false
 }
 
-rate_device_suitability :: proc(device: vk.PhysicalDevice, ms: ^Memory_System) -> int {
+rate_device_suitability :: proc(device: vk.PhysicalDevice, ms: ^MemorySystem) -> int {
 	props: vk.PhysicalDeviceProperties
 	features: vk.PhysicalDeviceFeatures
 
@@ -186,7 +186,7 @@ rate_device_suitability :: proc(device: vk.PhysicalDevice, ms: ^Memory_System) -
 
 pick_physical_device :: proc(
 	instance: vk.Instance,
-	ms: ^Memory_System,
+	ms: ^MemorySystem,
 ) -> (
 	vk.PhysicalDevice,
 	bool,
@@ -236,7 +236,7 @@ has_extension_name :: proc(exts: []cstring, target: cstring) -> bool {
 	return false
 }
 
-instance_extension_available :: proc(name: cstring, ms: ^Memory_System) -> bool {
+instance_extension_available :: proc(name: cstring, ms: ^MemorySystem) -> bool {
 	count: u32 = 0
 	if vk.EnumerateInstanceExtensionProperties(nil, &count, nil) != .SUCCESS || count == 0 {
 		return false
@@ -271,7 +271,7 @@ instance_extension_available :: proc(name: cstring, ms: ^Memory_System) -> bool 
 // - Send the window handle from the OS to the vulkan api (WSI - Window System Interface)
 // swap chain -> collection of render targets
 main :: proc() {
-	ms: Memory_System
+	ms: MemorySystem
 	memory_system_initialize(&ms)
 	defer memory_system_shutdown(&ms)
 
@@ -349,19 +349,19 @@ main :: proc() {
 		return
 	}
 
-    // Log out the phisycal device info
+	// Log out the phisycal device info
 	props: vk.PhysicalDeviceProperties
 	vk.GetPhysicalDeviceProperties(physical_device, &props)
 	device_name := string(cast(cstring)&props.deviceName[0])
 	log_infof("Selected physical device %s", device_name)
 
-    device_and_queue, ok_device_queue := create_logical_device_and_queue(physical_device, &ms)
-    if !ok_device_queue {
-        log_error("Failed to create logical device")
-        return
-    }
-    defer vk.DestroyDevice(device_and_queue.device, nil)
+	device_and_queue, ok_device_queue := create_logical_device_and_queue(physical_device, &ms)
+	if !ok_device_queue {
+		log_error("Failed to create logical device")
+		return
+	}
+	defer vk.DestroyDevice(device_and_queue.device, nil)
 
-    log_infof("Logical device created, graphics family=%d", device_and_queue.family_index)
-    _ = device_and_queue.queue
+	log_infof("Logical device created, graphics family=%d", device_and_queue.family_index)
+	_ = device_and_queue.queue
 }

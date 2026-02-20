@@ -5,12 +5,12 @@ import "core:mem"
 APP_MEMORY_SIZE :: #config(ODINGAME_APP_MEMORY_SIZE, 64 * mem.Megabyte)
 FRAME_MEMORY_SIZE :: #config(ODINGAME_FRAME_MEMORY_SIZE, 16 * mem.Megabyte)
 
-Memory_Region :: enum {
+MemoryRegion :: enum {
 	App,
 	Frame,
 }
 
-Memory_System :: struct {
+MemorySystem :: struct {
 	app_arena:       mem.Arena,
 	frame_arena:     mem.Arena,
 	app_allocator:   mem.Allocator,
@@ -18,12 +18,12 @@ Memory_System :: struct {
 	initialized:     bool,
 }
 
-Game_Memory_API :: struct {
+GameMemoryAPI :: struct {
 	app:   ^mem.Allocator,
 	frame: ^mem.Allocator,
 }
 
-Frame_Temp :: struct {
+FrameTemp :: struct {
 	allocator: mem.Allocator,
 	temp:      mem.Arena_Temp_Memory,
 }
@@ -31,7 +31,7 @@ Frame_Temp :: struct {
 app_memory_backing_buffer: [APP_MEMORY_SIZE]byte
 frame_memory_backing_buffer: [FRAME_MEMORY_SIZE]byte
 
-memory_system_initialize :: proc(ms: ^Memory_System) {
+memory_system_initialize :: proc(ms: ^MemorySystem) {
 	if ms == nil {
 		return
 	}
@@ -47,7 +47,7 @@ memory_system_initialize :: proc(ms: ^Memory_System) {
 	ms.initialized = true
 }
 
-memory_system_shutdown :: proc(ms: ^Memory_System) {
+memory_system_shutdown :: proc(ms: ^MemorySystem) {
 	if ms == nil || !ms.initialized {
 		return
 	}
@@ -57,29 +57,29 @@ memory_system_shutdown :: proc(ms: ^Memory_System) {
 	ms^ = {}
 }
 
-memory_system_reset_frame :: proc(ms: ^Memory_System) {
+memory_system_reset_frame :: proc(ms: ^MemorySystem) {
 	if ms == nil || !ms.initialized {
 		return
 	}
 	mem.arena_free_all(&ms.frame_arena)
 }
 
-memory_system_api :: proc(ms: ^Memory_System) -> Game_Memory_API {
-	return Game_Memory_API{app = &ms.app_allocator, frame = &ms.frame_allocator}
+memory_system_api :: proc(ms: ^MemorySystem) -> GameMemoryAPI {
+	return GameMemoryAPI{app = &ms.app_allocator, frame = &ms.frame_allocator}
 }
 
-memory_begin_frame_temp :: proc(ms: ^Memory_System) -> Frame_Temp {
+memory_begin_frame_temp :: proc(ms: ^MemorySystem) -> FrameTemp {
 	if ms == nil || !ms.initialized {
 		return {}
 	}
 
-	return Frame_Temp {
+	return FrameTemp {
 		allocator = ms.frame_allocator,
 		temp      = mem.begin_arena_temp_memory(&ms.frame_arena),
 	}
 }
 
-memory_end_frame_temp :: proc(frame: ^Frame_Temp) {
+memory_end_frame_temp :: proc(frame: ^FrameTemp) {
 	if frame != nil && frame.temp.arena != nil {
 		mem.end_arena_temp_memory(frame.temp)
 		frame^ = {}
