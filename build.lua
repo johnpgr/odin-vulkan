@@ -68,6 +68,20 @@ local function command_to_string(cmd)
     return table.concat(escaped, " ")
 end
 
+local function is_debug_build()
+    local mode = os.getenv("ODINGAME_BUILD_MODE")
+    if mode then
+        mode = mode:lower()
+        if mode == "release" then
+            return false
+        end
+        if mode == "debug" then
+            return true
+        end
+    end
+    return true
+end
+
 local function find_vulkan_lib_dir(vulkan_sdk)
     local candidates = {
         joinpath(vulkan_sdk, "Lib"),
@@ -98,6 +112,7 @@ local function get_build_command(project_root)
     local project_name = basename(root)
     local output_name = project_name .. (is_windows and ".exe" or "")
     local output_rel_path = joinpath("bin", output_name)
+    local debug_build = is_debug_build()
 
     if is_windows then
         local vulkan_sdk = os.getenv("VULKAN_SDK")
@@ -110,19 +125,27 @@ local function get_build_command(project_root)
             return nil, "Could not find vulkan-1.lib under VULKAN_SDK"
         end
 
-        return {
+        local build_cmd = {
             "odin",
             "build",
             ".",
-            "-debug",
-            "-subsystem:windows",
+            "-subsystem:" .. (debug_build and "console" or "windows"),
             "-out:" .. output_rel_path,
             "-extra-linker-flags:/LIBPATH:" .. quote_if_needed(vulkan_lib_path),
         }
+
+        if debug_build then
+            table.insert(build_cmd, 4, "-debug")
+        end
+
+        return build_cmd
     end
 
     if is_macos then
-        local build_cmd = { "odin", "build", ".", "-debug", "-out:" .. output_rel_path }
+        local build_cmd = { "odin", "build", ".", "-out:" .. output_rel_path }
+        if debug_build then
+            table.insert(build_cmd, "-debug")
+        end
         local vulkan_sdk = os.getenv("VULKAN_SDK")
 
         local candidates = {
@@ -146,7 +169,11 @@ local function get_build_command(project_root)
         return build_cmd
     end
 
-    return { "odin", "build", ".", "-debug", "-out:" .. output_rel_path }
+    local build_cmd = { "odin", "build", ".", "-out:" .. output_rel_path }
+    if debug_build then
+        table.insert(build_cmd, "-debug")
+    end
+    return build_cmd
 end
 
 local function script_dir()

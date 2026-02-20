@@ -1,5 +1,6 @@
 package main
 
+import "core:fmt"
 import glfw "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -247,7 +248,7 @@ instance_extension_available :: proc(name: cstring) -> bool {
 // To render the initial triangle w/ Vulkan:
 // 1. get the vkInstance [x]
 // 2. query it to get a vkPhysicalDevice [x]
-// 3. create a vkDevice (logical device) [ ]
+// 3. create a vkDevice (logical device) [x]
 // 4. specify which queue families to use [ ]
 // 5. window (glfw)
 // 6. vkSurfaceKHR & vkSwapchainKHR [KHR -> extension postfix]
@@ -272,33 +273,27 @@ main :: proc() {
 	app_info := vk.ApplicationInfo {
 		sType              = .APPLICATION_INFO,
 		pApplicationName   = "OdinGame",
-		applicationVersion = vk.MAKE_VERSION(0, 1, 0),
+		applicationVersion = vk.MAKE_VERSION(1, 0, 0),
 		pEngineName        = "NoEngine",
-		engineVersion      = vk.MAKE_VERSION(0, 1, 0),
+		engineVersion      = vk.MAKE_VERSION(1, 0, 0),
 		apiVersion         = vk.API_VERSION_1_4,
 	}
 
-	required_exts := glfw.GetRequiredInstanceExtensions()
-	if len(required_exts) == 0 {
-		log_error("GLFW returned no Vulkan instance extensions")
-		return
-	}
+	glfw_extensions := glfw.GetRequiredInstanceExtensions()
+	extensions := make([dynamic]cstring, len(glfw_extensions))
+	copy(extensions[:], glfw_extensions)
 
 	portability_ext: cstring = vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
 	enable_portability := instance_extension_available(portability_ext)
 	append_portability_name :=
-		enable_portability && !has_extension_name(required_exts, portability_ext)
+		enable_portability && !has_extension_name(glfw_extensions, portability_ext)
 
-	ext_count := len(required_exts)
 	if append_portability_name {
-		ext_count += 1
+		append(&extensions, portability_ext)
 	}
 
-	exts := make([]cstring, ext_count)
-	copy(exts, required_exts)
-	if append_portability_name {
-		exts[len(required_exts)] = portability_ext
-	}
+	append(&extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+	validation_layers: []cstring = {"VK_LAYER_KHRONOS_validation"}
 
 	create_flags := vk.InstanceCreateFlags{}
 	if enable_portability {
@@ -309,8 +304,10 @@ main :: proc() {
 		sType                   = .INSTANCE_CREATE_INFO,
 		flags                   = create_flags,
 		pApplicationInfo        = &app_info,
-		enabledExtensionCount   = u32(len(exts)),
-		ppEnabledExtensionNames = raw_data(exts),
+		enabledLayerCount       = u32(len(validation_layers)),
+		ppEnabledLayerNames     = raw_data(validation_layers[:]),
+		enabledExtensionCount   = u32(len(extensions)),
+		ppEnabledExtensionNames = raw_data(extensions[:]),
 	}
 
 	instance: vk.Instance
@@ -319,8 +316,6 @@ main :: proc() {
 		log_error("vkCreateInstance failed:", res)
 		return
 	}
-	log_info("Vulkan instance created!")
-
 	defer vk.DestroyInstance(instance, nil)
 	vk.load_proc_addresses_instance(instance)
 
