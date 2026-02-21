@@ -53,7 +53,8 @@ find_queue_families :: proc(
 	)
 
 	families := QueueFamilyIndices{}
-	found_gfx, found_present := false, false
+	found_gfx: b32 = false
+	found_present: b32 = false
 
 	// Then we loop it to get the families idxs
 	for i in 0 ..< int(queue_family_count) {
@@ -64,9 +65,11 @@ find_queue_families :: proc(
 				found_gfx = true
 			}
 
-			if vk.GetPhysicalDeviceSurfaceSupportKHR(device, u32(i), surface, nil) == .SUCCESS {
-				families.present_family = u32(i)
-				found_present = true
+			if !found_present {
+				vk.GetPhysicalDeviceSurfaceSupportKHR(device, u32(i), surface, &found_present)
+				if found_present {
+					families.present_family = u32(i)
+				}
 			}
 		}
 	}
@@ -122,19 +125,24 @@ create_gpu_context :: proc(
 	}
 
 	queue_priority: f32 = 1.0
-	queue_create_infos := [2]vk.DeviceQueueCreateInfo {
-		{
-			sType = .DEVICE_QUEUE_CREATE_INFO,
-			queueFamilyIndex = queue_families.graphics_family,
-			queueCount = 1,
-			pQueuePriorities = &queue_priority,
-		},
-		{
-			sType = .DEVICE_QUEUE_CREATE_INFO,
+	queue_create_infos: [2]vk.DeviceQueueCreateInfo
+	queue_create_info_count: u32 = 1
+
+	queue_create_infos[0] = vk.DeviceQueueCreateInfo {
+		sType            = .DEVICE_QUEUE_CREATE_INFO,
+		queueFamilyIndex = queue_families.graphics_family,
+		queueCount       = 1,
+		pQueuePriorities = &queue_priority,
+	}
+
+	if queue_families.present_family != queue_families.graphics_family {
+		queue_create_infos[1] = vk.DeviceQueueCreateInfo {
+			sType            = .DEVICE_QUEUE_CREATE_INFO,
 			queueFamilyIndex = queue_families.present_family,
-			queueCount = 1,
+			queueCount       = 1,
 			pQueuePriorities = &queue_priority,
-		},
+		}
+		queue_create_info_count = 2
 	}
 
 	// Specify the device extensions we need (swapchain is essencial for rendering)
@@ -155,6 +163,7 @@ create_gpu_context :: proc(
 
 	// For Vulkan 1.3 features like dynamic rendering, chain a features struct
 	dynamic_rendering_feature := vk.PhysicalDeviceDynamicRenderingFeatures {
+		sType            = .PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
 		dynamicRendering = true,
 	}
 
@@ -167,8 +176,8 @@ create_gpu_context :: proc(
 	create_info := vk.DeviceCreateInfo {
 		sType                   = .DEVICE_CREATE_INFO,
 		pNext                   = &features2,
-		queueCreateInfoCount    = len(queue_create_infos),
-		pQueueCreateInfos       = raw_data(queue_create_infos[:]),
+		queueCreateInfoCount    = queue_create_info_count,
+		pQueueCreateInfos       = &queue_create_infos[0],
 		enabledExtensionCount   = u32(len(device_extensions)),
 		ppEnabledExtensionNames = raw_data(device_extensions[:]),
 	}
