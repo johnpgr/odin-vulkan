@@ -2,6 +2,7 @@ package main
 
 import "core:mem"
 import "core:os"
+import "core:fmt"
 import glfw "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -545,6 +546,314 @@ recreate_swapchain :: proc(
 	return true
 }
 
+record_command_buffer :: proc(
+	cmd: vk.CommandBuffer,
+	swapchain_image: vk.Image,
+	image_view: vk.ImageView,
+	extent: vk.Extent2D,
+	pipeline: vk.Pipeline,
+	layout: vk.PipelineLayout,
+) -> bool {
+	cmd_begin_info := vk.CommandBufferBeginInfo {
+		sType = .COMMAND_BUFFER_BEGIN_INFO,
+	}
+
+	if vk.BeginCommandBuffer(cmd, &cmd_begin_info) != .SUCCESS {
+		return false
+	}
+
+	// Transition swapchain image to color attachment optimal
+	begin_barrier := vk.ImageMemoryBarrier2 {
+		sType            = .IMAGE_MEMORY_BARRIER_2,
+		srcStageMask     = {.TOP_OF_PIPE},
+		srcAccessMask    = {},
+		dstStageMask     = {.COLOR_ATTACHMENT_OUTPUT},
+		dstAccessMask    = {.COLOR_ATTACHMENT_WRITE},
+		oldLayout        = .UNDEFINED,
+		newLayout        = .COLOR_ATTACHMENT_OPTIMAL,
+		image            = swapchain_image,
+		subresourceRange = {{.COLOR}, 0, 1, 0, 1},
+	}
+
+	dependency_info := vk.DependencyInfo {
+		sType                   = .DEPENDENCY_INFO,
+		imageMemoryBarrierCount = 1,
+		pImageMemoryBarriers    = &begin_barrier,
+	}
+
+	vk.CmdPipelineBarrier2(cmd, &dependency_info)
+
+	clear_value := vk.ClearValue {
+		color = vk.ClearColorValue{float32 = {0.0, 0.0, 0.0, 1.0}},
+	}
+
+	// Define the color attachment for dynamic rendering
+	color_attachment := vk.RenderingAttachmentInfo {
+		sType       = .RENDERING_ATTACHMENT_INFO,
+		imageView   = image_view,
+		imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+		loadOp      = .CLEAR,
+		storeOp     = .STORE,
+		clearValue  = clear_value,
+	}
+
+	// Begin dynamic rendering
+	render_info := vk.RenderingInfo {
+		sType                = .RENDERING_INFO,
+		renderArea           = {{0, 0}, extent},
+		layerCount           = 1,
+		colorAttachmentCount = 1,
+		pColorAttachments    = &color_attachment,
+	}
+
+	vk.CmdBeginRendering(cmd, &render_info)
+
+	// Bind pipeline and set dynamic state
+	vk.CmdBindPipeline(cmd, .GRAPHICS, pipeline)
+
+	viewports := vk.Viewport{0.0, 0.0, f32(extent.width), f32(extent.height), 0.0, 1.0}
+	vk.CmdSetViewport(cmd, 0, 1, &viewports)
+
+	rect := vk.Rect2D{{0, 0}, extent}
+	vk.CmdSetScissor(cmd, 0, 1, &rect)
+
+	// Draw the triangle! (3 vertices, 1 instance, no offsets)
+	vk.CmdDraw(cmd, 3, 1, 0, 0)
+
+	vk.CmdEndRendering(cmd)
+
+	// Transition swapchain image to present layout
+	end_barrier := vk.ImageMemoryBarrier2 {
+		sType            = .IMAGE_MEMORY_BARRIER_2,
+		srcStageMask     = {.COLOR_ATTACHMENT_OUTPUT},
+		srcAccessMask    = {.COLOR_ATTACHMENT_WRITE},
+		dstStageMask     = {.BOTTOM_OF_PIPE},
+		dstAccessMask    = {},
+		oldLayout        = .COLOR_ATTACHMENT_OPTIMAL,
+		newLayout        = .PRESENT_SRC_KHR,
+		image            = swapchain_image,
+		subresourceRange = {{.COLOR}, 0, 1, 0, 1},
+	}
+
+	end_dependency_info := vk.DependencyInfo {
+		sType                   = .DEPENDENCY_INFO,
+		imageMemoryBarrierCount = 1,
+		pImageMemoryBarriers    = &end_barrier,
+	}
+	vk.CmdPipelineBarrier2(cmd, &end_dependency_info)
+
+	if vk.EndCommandBuffer(cmd) != .SUCCESS {
+		return false
+	}
+
+	return true
+}
+
+has_suffix :: proc(value: string, suffix: string) -> bool {
+	if len(value) < len(suffix) {
+		return false
+	}
+
+	return value[len(value)-len(suffix):] == suffix
+}
+
+load_shader :: proc(
+	device: vk.Device,
+	shader_name: string,
+) -> (
+	vk.ShaderModule,
+	vk.PipelineShaderStageCreateInfo,
+	bool,
+) {
+	shader_stage := vk.ShaderStageFlags{}
+	if has_suffix(shader_name, ".vert") {
+		shader_stage = {.VERTEX}
+	} else if has_suffix(shader_name, ".frag") {
+		shader_stage = {.FRAGMENT}
+	} else {
+		log_errorf("Unsupported shader stage for %s", shader_name)
+		return {}, {}, false
+	}
+
+	shader_path := fmt.tprintf("shaders/%s.spv", shader_name)
+	shader_code, ok_shader := os.read_entire_file(shader_path, context.temp_allocator)
+	if !ok_shader {
+		log_errorf("Failed to load shader from disk: %s", shader_path)
+		return {}, {}, false
+	}
+	defer delete(shader_code, context.temp_allocator)
+
+	shader_module_info := vk.ShaderModuleCreateInfo {
+		sType    = .SHADER_MODULE_CREATE_INFO,
+		codeSize = len(shader_code),
+		pCode    = cast([^]u32)raw_data(shader_code),
+	}
+
+	shader_module: vk.ShaderModule
+	if vk.CreateShaderModule(device, &shader_module_info, nil, &shader_module) != .SUCCESS {
+		log_errorf("Failed to create shader module: %s", shader_path)
+		return {}, {}, false
+	}
+
+	shader_stage_info := vk.PipelineShaderStageCreateInfo {
+		sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+		stage  = shader_stage,
+		module = shader_module,
+		pName  = "main",
+	}
+
+	return shader_module, shader_stage_info, true
+}
+
+create_graphics_pipeline :: proc(
+	device: vk.Device,
+	image_format: vk.Format,
+	shader_stages: []vk.PipelineShaderStageCreateInfo,
+) -> (
+	vk.PipelineLayout,
+	vk.Pipeline,
+	bool,
+) {
+	vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
+		sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+	}
+
+	input_asssembly := vk.PipelineInputAssemblyStateCreateInfo {
+		sType                  = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+		topology               = .TRIANGLE_LIST,
+		primitiveRestartEnable = false,
+	}
+
+	viewport_state := vk.PipelineViewportStateCreateInfo {
+		sType         = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+		viewportCount = 1,
+		scissorCount  = 1,
+	}
+
+	dynamic_states := [2]vk.DynamicState{.VIEWPORT, .SCISSOR}
+	dynamic_state := vk.PipelineDynamicStateCreateInfo {
+		sType             = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+		dynamicStateCount = u32(len(dynamic_states)),
+		pDynamicStates    = raw_data(&dynamic_states),
+	}
+
+	rasterizer := vk.PipelineRasterizationStateCreateInfo {
+		sType                   = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+		depthClampEnable        = false,
+		rasterizerDiscardEnable = false,
+		polygonMode             = .FILL,
+		cullMode                = {.BACK},
+		frontFace               = .CLOCKWISE,
+		depthBiasEnable         = false,
+		lineWidth               = 1.0,
+	}
+
+	multisampling := vk.PipelineMultisampleStateCreateInfo {
+		sType                = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+		rasterizationSamples = {._1},
+		sampleShadingEnable  = false,
+	}
+
+	colorblend_attachment := vk.PipelineColorBlendAttachmentState {
+		blendEnable    = false,
+		colorWriteMask = {.R, .G, .B, .A},
+	}
+
+	color_blending := vk.PipelineColorBlendStateCreateInfo {
+		sType           = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		logicOpEnable   = false,
+		attachmentCount = 1,
+		pAttachments    = &colorblend_attachment,
+	}
+
+	pipeline_layout_info := vk.PipelineLayoutCreateInfo {
+		sType = .PIPELINE_LAYOUT_CREATE_INFO,
+	}
+
+	pipeline_layout: vk.PipelineLayout
+	if vk.CreatePipelineLayout(device, &pipeline_layout_info, nil, &pipeline_layout) != .SUCCESS {
+		return {}, {}, false
+	}
+
+	color_attachment_format := image_format
+	rendering_info := vk.PipelineRenderingCreateInfo {
+		sType                   = .PIPELINE_RENDERING_CREATE_INFO,
+		colorAttachmentCount    = 1,
+		pColorAttachmentFormats = &color_attachment_format,
+	}
+
+	pipeline_info := vk.GraphicsPipelineCreateInfo {
+		sType               = .GRAPHICS_PIPELINE_CREATE_INFO,
+		pNext               = &rendering_info,
+		stageCount          = u32(len(shader_stages)),
+		pStages             = raw_data(shader_stages),
+		pVertexInputState   = &vertex_input_info,
+		pInputAssemblyState = &input_asssembly,
+		pViewportState      = &viewport_state,
+		pRasterizationState = &rasterizer,
+		pMultisampleState   = &multisampling,
+		pColorBlendState    = &color_blending,
+		pDynamicState       = &dynamic_state,
+		layout              = pipeline_layout,
+	}
+
+	graphics_pipeline: vk.Pipeline
+	if vk.CreateGraphicsPipelines(
+		   device,
+		   vk.PipelineCache(0),
+		   1,
+		   &pipeline_info,
+		   nil,
+		   &graphics_pipeline,
+	   ) !=
+	   .SUCCESS {
+		vk.DestroyPipelineLayout(device, pipeline_layout, nil)
+		return {}, {}, false
+	}
+
+	return pipeline_layout, graphics_pipeline, true
+}
+
+recreate_swapchain_and_pipeline :: proc(
+	device: vk.Device,
+	physical_device: vk.PhysicalDevice,
+	surface: vk.SurfaceKHR,
+	indices: QueueFamilyIndices,
+	swapchain_allocator: mem.Allocator,
+	swapchain_context: ^SwapchainContext,
+	shader_stages: []vk.PipelineShaderStageCreateInfo,
+	pipeline_layout: ^vk.PipelineLayout,
+	graphics_pipeline: ^vk.Pipeline,
+) -> bool {
+	if !recreate_swapchain(
+		device,
+		physical_device,
+		surface,
+		indices,
+		swapchain_allocator,
+		swapchain_context,
+	) {
+		return false
+	}
+
+	new_pipeline_layout, new_graphics_pipeline, ok_pipeline := create_graphics_pipeline(
+		device,
+		swapchain_context.image_format,
+		shader_stages,
+	)
+	if !ok_pipeline {
+		return false
+	}
+
+	vk.DestroyPipeline(device, graphics_pipeline^, nil)
+	vk.DestroyPipelineLayout(device, pipeline_layout^, nil)
+
+	graphics_pipeline^ = new_graphics_pipeline
+	pipeline_layout^ = new_pipeline_layout
+
+	return true
+}
+
 // To render the initial triangle w/ Vulkan:
 // 1. get the vkInstance [x]
 // 2. query it to get a vkPhysicalDevice [x]
@@ -678,167 +987,249 @@ main :: proc() {
 	log_infof("Logical device created, graphics family=%d", gpu_context.graphics_family_index)
 	log_infof("Swapchain created with %d images", len(swapchain_context.images))
 
-	// Loading the shader modules
-	vert_code, ok_vert := os.read_entire_file("shaders/triangle.vert.spv", context.temp_allocator)
-	frag_code, ok_frag := os.read_entire_file("shaders/triangles.frag.spv", context.temp_allocator)
+	// Loading shader modules + stage infos
+	vert_module, vert_stage_info, ok_vert_shader := load_shader(gpu_context.device, "triangle.vert")
+	frag_module, frag_stage_info, ok_frag_shader := load_shader(gpu_context.device, "triangle.frag")
 
-	if !ok_vert || !ok_frag {
-		log_error("Failed to load shaders from disk")
+	if !ok_vert_shader || !ok_frag_shader {
+		log_error("Failed to load shader modules")
 		return
 	}
+	defer vk.DestroyShaderModule(gpu_context.device, vert_module, nil)
+	defer vk.DestroyShaderModule(gpu_context.device, frag_module, nil)
 
-	vert_module_info := vk.ShaderModuleCreateInfo {
-		sType    = .SHADER_MODULE_CREATE_INFO,
-		codeSize = len(vert_code),
-		pCode    = cast([^]u32)raw_data(vert_code),
-	}
+	shader_stages := [2]vk.PipelineShaderStageCreateInfo{vert_stage_info, frag_stage_info}
 
-	frag_module_info := vk.ShaderModuleCreateInfo {
-		sType    = .SHADER_MODULE_CREATE_INFO,
-		codeSize = len(frag_code),
-		pCode    = cast([^]u32)raw_data(frag_code),
-	}
-
-	vert_module, frag_module: vk.ShaderModule
-	res_vert_module := vk.CreateShaderModule(
+	// Build graphics pipeline for current swapchain format
+	pipeline_layout, graphics_pipeline, ok_pipeline := create_graphics_pipeline(
 		gpu_context.device,
-		&vert_module_info,
-		nil,
-		&vert_module,
+		swapchain_context.image_format,
+		shader_stages[:],
 	)
-	res_frag_module := vk.CreateShaderModule(
-		gpu_context.device,
-		&frag_module_info,
-		nil,
-		&frag_module,
-	)
-
-	if res_vert_module != .SUCCESS || res_frag_module != .SUCCESS {
-		log_error("Failed to create shader modules from the loaded shader code")
-		return
-	}
-
-	// Building the pipeline
-	shader_stages := [2]vk.PipelineShaderStageCreateInfo {
-		{
-			sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-			stage = {.VERTEX},
-			module = vert_module,
-			pName = "main",
-		},
-		{
-			sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-			stage = {.FRAGMENT},
-			module = frag_module,
-			pName = "main",
-		},
-	}
-
-	// No vertex input for now (vertices are hardcoded in the vertex shader)
-	vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
-		sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-	}
-
-	// We're drawing a triangle list
-	input_asssembly := vk.PipelineInputAssemblyStateCreateInfo {
-		sType                  = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-		topology               = .TRIANGLE_LIST,
-		primitiveRestartEnable = false,
-	}
-
-	// Viewport and scisso will be set dynamically
-	viewport_state := vk.PipelineViewportStateCreateInfo {
-		sType         = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-		viewportCount = 1,
-		scissorCount  = 1,
-	}
-
-	dynamic_states := [2]vk.DynamicState{.VIEWPORT, .SCISSOR}
-
-	dynamic_state := vk.PipelineDynamicStateCreateInfo {
-		sType             = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-		dynamicStateCount = u32(len(dynamic_states)),
-		pDynamicStates    = raw_data(&dynamic_states),
-	}
-
-	rasterizer := vk.PipelineRasterizationStateCreateInfo {
-		sType                   = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-		depthClampEnable        = false,
-		rasterizerDiscardEnable = false,
-		polygonMode             = .FILL,
-		cullMode                = {.BACK},
-		frontFace               = .CLOCKWISE,
-		depthBiasEnable         = false,
-		lineWidth               = 1.0,
-	}
-
-	// Multisampling (disabled for now)
-	multisampling := vk.PipelineMultisampleStateCreateInfo {
-		sType                = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-		rasterizationSamples = {._1},
-		sampleShadingEnable  = false,
-	}
-
-	// Color blending (no blending - just write the fragment color)
-	colorblend_attachment := vk.PipelineColorBlendAttachmentState {
-		blendEnable    = false,
-		colorWriteMask = {.R, .G, .B, .A},
-	}
-
-	color_blending := vk.PipelineColorBlendStateCreateInfo {
-		sType           = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-		logicOpEnable   = false,
-		attachmentCount = 1,
-		pAttachments    = &colorblend_attachment,
-	}
-
-	// Pipeline layout (no descriptor sets or push constants yet)
-	pipeline_layout_info := vk.PipelineLayoutCreateInfo {
-		sType = .PIPELINE_LAYOUT_CREATE_INFO,
-	}
-
-	pipeline_layout: vk.PipelineLayout
-	if vk.CreatePipelineLayout(gpu_context.device, &pipeline_layout_info, nil, &pipeline_layout) !=
-	   .SUCCESS {
-		log_error("Failed to create the Vulkan pipeline layout")
-		return
-	}
-
-	// For dynamic rendering, we specify the color attachment format here
-	// instead of referencing a VkRenderPass
-	rendering_info := vk.PipelineRenderingCreateInfo {
-		sType                   = .PIPELINE_RENDERING_CREATE_INFO,
-		colorAttachmentCount    = 1,
-		pColorAttachmentFormats = &swapchain_context.image_format,
-	}
-
-	// AVENGERS, ASSEMBLE!
-	pipeline_info := vk.GraphicsPipelineCreateInfo {
-		sType               = .GRAPHICS_PIPELINE_CREATE_INFO,
-		pNext               = &rendering_info,
-		stageCount          = u32(len(shader_stages)),
-		pStages             = raw_data(&shader_stages),
-		pVertexInputState   = &vertex_input_info,
-		pInputAssemblyState = &input_asssembly,
-		pViewportState      = &viewport_state,
-		pRasterizationState = &rasterizer,
-		pMultisampleState   = &multisampling,
-		pColorBlendState    = &color_blending,
-		pDynamicState       = &dynamic_state,
-		layout              = pipeline_layout,
-	}
-
-	graphics_pipeline: vk.Pipeline
-	if vk.CreateGraphicsPipelines(
-		   gpu_context.device,
-		   vk.PipelineCache(0),
-		   1,
-		   &pipeline_info,
-		   nil,
-		   &graphics_pipeline,
-	   ) !=
-	   .SUCCESS {
+	if !ok_pipeline {
 		log_error("Failed to create the Vulkan graphics pipeline")
 		return
 	}
+	defer vk.DestroyPipeline(gpu_context.device, graphics_pipeline, nil)
+	defer vk.DestroyPipelineLayout(gpu_context.device, pipeline_layout, nil)
+
+	pool_info := vk.CommandPoolCreateInfo {
+		sType            = .COMMAND_POOL_CREATE_INFO,
+		flags            = {.RESET_COMMAND_BUFFER},
+		queueFamilyIndex = gpu_context.graphics_family_index,
+	}
+
+	command_pool: vk.CommandPool
+	if vk.CreateCommandPool(gpu_context.device, &pool_info, nil, &command_pool) != .SUCCESS {
+		log_error("Failed to create the Vulkan CommandPool")
+		return
+	}
+	defer vk.DestroyCommandPool(gpu_context.device, command_pool, nil)
+
+	// Allocate a command buffer from the pool
+	alloc_info := vk.CommandBufferAllocateInfo {
+		commandPool        = command_pool,
+		level              = .PRIMARY,
+		commandBufferCount = 1,
+	}
+
+	cmd: vk.CommandBuffer
+	if vk.AllocateCommandBuffers(gpu_context.device, &alloc_info, &cmd) != .SUCCESS {
+		log_error("Failed to allocate Vulkan CommandBuffers")
+		return
+	}
+
+	// Per-frame synchronization
+	image_available_semaphore: vk.Semaphore
+	image_available_semaphore_info := vk.SemaphoreCreateInfo {
+		sType = .SEMAPHORE_CREATE_INFO,
+	}
+
+	res_image_available_semaphore := vk.CreateSemaphore(
+		gpu_context.device,
+		&image_available_semaphore_info,
+		nil,
+		&image_available_semaphore,
+	)
+
+	render_finished_semaphore: vk.Semaphore
+	render_finished_semaphore_info := vk.SemaphoreCreateInfo {
+		sType = .SEMAPHORE_CREATE_INFO,
+	}
+
+	res_render_finished_semaphore := vk.CreateSemaphore(
+		gpu_context.device,
+		&render_finished_semaphore_info,
+		nil,
+		&render_finished_semaphore,
+	)
+
+	if res_image_available_semaphore != .SUCCESS || res_render_finished_semaphore != .SUCCESS {
+		log_error("Failed to create Vulkan frame synchronization semaphores")
+		return
+	}
+	defer vk.DestroySemaphore(gpu_context.device, image_available_semaphore, nil)
+	defer vk.DestroySemaphore(gpu_context.device, render_finished_semaphore, nil)
+
+	in_flight_fence: vk.Fence
+	in_flight_fence_info := vk.FenceCreateInfo {
+		sType = .FENCE_CREATE_INFO,
+		flags = {.SIGNALED}, // first frame won't deadlock
+	}
+
+	if vk.CreateFence(gpu_context.device, &in_flight_fence_info, nil, &in_flight_fence) !=
+	   .SUCCESS {
+		log_error("Failed to create Vulkan frame synchronization fence")
+		return
+	}
+	defer vk.DestroyFence(gpu_context.device, in_flight_fence, nil)
+
+	// We can finally render
+	for !glfw.WindowShouldClose(window) {
+		free_all(context.temp_allocator)
+		glfw.PollEvents()
+
+		// Wait for the previous frame to finish
+		wait_result := vk.WaitForFences(
+			gpu_context.device,
+			1,
+			&in_flight_fence,
+			true,
+			~u64(0), // infinite wait
+		)
+
+		#partial switch wait_result {
+		case .SUCCESS:
+		case .ERROR_DEVICE_LOST:
+			log_error("Device lost while waiting for fence")
+			return
+		case .TIMEOUT:
+			// Won't happen with infinite timeout, but keep if timeout changes later.
+			continue
+		case:
+			log_errorf("WaitForFences failed: %v", wait_result)
+			return
+		}
+
+
+		// Acquire the next swap chain image
+		image_index: u32
+		acquire_result := vk.AcquireNextImageKHR(
+			gpu_context.device,
+			swapchain_context.handle,
+			~u64(0), // block until next image is available
+			image_available_semaphore,
+			vk.Fence(0), // no acquire fence, semaphore only
+			&image_index,
+		)
+
+		#partial switch acquire_result {
+		case .SUCCESS:
+		// proceed
+		case .SUBOPTIMAL_KHR, .ERROR_OUT_OF_DATE_KHR:
+			if !recreate_swapchain_and_pipeline(
+				gpu_context.device,
+				physical_device,
+				surface,
+				queue_family_indices,
+				swapchain_allocator,
+				&swapchain_context,
+				shader_stages[:],
+				&pipeline_layout,
+				&graphics_pipeline,
+			) {
+				log_error("Failed to recreate swapchain/pipeline after acquire")
+				return
+			}
+			continue
+		case .ERROR_DEVICE_LOST:
+			log_error("Device lost in AcquireNextImageKHR")
+			return
+		case:
+			log_errorf("AcquireNextImageKHR failed: %v", acquire_result)
+			return
+		}
+
+		// Record commands for this image
+		if vk.ResetCommandBuffer(cmd, {}) != .SUCCESS {
+			log_error("Failed to reset command buffer")
+			return
+		}
+
+		if !record_command_buffer(
+			cmd,
+			swapchain_context.images[image_index],
+			swapchain_context.image_views[image_index],
+			swapchain_context.extent,
+			graphics_pipeline,
+			pipeline_layout,
+		) {
+			log_error("Failed to record command buffer")
+			return
+		}
+
+		if vk.ResetFences(gpu_context.device, 1, &in_flight_fence) != .SUCCESS {
+			log_error("ResetFences failed")
+			return
+		}
+
+		// Submit the commands
+		wait_stages := vk.PipelineStageFlags{.COLOR_ATTACHMENT_OUTPUT}
+
+		submit_info := vk.SubmitInfo {
+			sType                = .SUBMIT_INFO,
+			waitSemaphoreCount   = 1,
+			pWaitSemaphores      = &image_available_semaphore,
+			pWaitDstStageMask    = &wait_stages,
+			commandBufferCount   = 1,
+			pCommandBuffers      = &cmd,
+			signalSemaphoreCount = 1,
+			pSignalSemaphores    = &render_finished_semaphore,
+		}
+
+		if vk.QueueSubmit(gpu_context.graphics_queue, 1, &submit_info, in_flight_fence) !=
+		   .SUCCESS {
+			log_error("Failed to submit graphics queue")
+			return
+		}
+
+		// Present the rendered image
+		present_info := vk.PresentInfoKHR {
+			sType              = .PRESENT_INFO_KHR,
+			waitSemaphoreCount = 1,
+			pWaitSemaphores    = &render_finished_semaphore,
+			swapchainCount     = 1,
+			pSwapchains        = &swapchain_context.handle,
+			pImageIndices      = &image_index,
+		}
+
+		present_result := vk.QueuePresentKHR(gpu_context.present_queue, &present_info)
+		#partial switch present_result {
+		case .SUCCESS:
+		// proceed
+		case .SUBOPTIMAL_KHR, .ERROR_OUT_OF_DATE_KHR:
+			if !recreate_swapchain_and_pipeline(
+				gpu_context.device,
+				physical_device,
+				surface,
+				queue_family_indices,
+				swapchain_allocator,
+				&swapchain_context,
+				shader_stages[:],
+				&pipeline_layout,
+				&graphics_pipeline,
+			) {
+				log_error("Failed to recreate swapchain/pipeline after present")
+				return
+			}
+			continue
+		case .ERROR_DEVICE_LOST:
+			log_error("Device lost in QueuePresentKHR")
+			return
+		case:
+			log_errorf("QueuePresentKHR failed: %v", present_result)
+			return
+		}
+	}
+
 }

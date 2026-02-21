@@ -68,6 +68,129 @@ local function command_to_string(cmd)
     return table.concat(escaped, " ")
 end
 
+local function execute_in_dir(project_root, command)
+    local run_cmd
+    if is_windows then
+        run_cmd = "cd /d " .. shell_escape(project_root) .. " && " .. command
+    else
+        run_cmd = "cd " .. shell_escape(project_root) .. " && " .. command
+    end
+
+    local success, reason, code = os.execute(run_cmd)
+    if success == true or success == 0 then
+        return true
+    end
+
+    if type(code) == "number" then
+        return false, "exit code " .. code
+    end
+    if type(reason) == "string" and reason ~= "" then
+        return false, reason
+    end
+
+    return false, "unknown error"
+end
+
+local function popen_in_dir(project_root, command)
+    local run_cmd
+    if is_windows then
+        run_cmd = "cd /d " .. shell_escape(project_root) .. " && " .. command
+    else
+        run_cmd = "cd " .. shell_escape(project_root) .. " && " .. command
+    end
+    return io.popen(run_cmd)
+end
+
+local function normalize_slashes(path)
+    return path:gsub("\\", "/")
+end
+
+local function make_relative_path(project_root, path)
+    local root = normalize_slashes(project_root):gsub("/+$", "")
+    local candidate = normalize_slashes(path):gsub("^%./", "")
+
+    if is_windows then
+        if candidate:sub(1, #root):lower() == root:lower() then
+            candidate = candidate:sub(#root + 1)
+        end
+    elseif candidate:sub(1, #root) == root then
+        candidate = candidate:sub(#root + 1)
+    end
+
+    return candidate:gsub("^/+", "")
+end
+
+local function discover_shader_sources(project_root)
+    local list_cmd
+    if is_windows then
+        list_cmd = "dir /s /b shaders\\*.vert shaders\\*.frag 2>nul"
+    else
+        list_cmd = "find shaders -type f \\( -name '*.vert' -o -name '*.frag' \\) -print 2>/dev/null"
+    end
+
+    local proc = popen_in_dir(project_root, list_cmd)
+    if not proc then
+        return nil, "Could not enumerate shader sources"
+    end
+
+    local sources = {}
+    for raw_line in proc:lines() do
+        local line = raw_line:gsub("\r$", "")
+        if line ~= "" and line ~= "File Not Found" then
+            sources[#sources + 1] = make_relative_path(project_root, line)
+        end
+    end
+    proc:close()
+
+    table.sort(sources)
+    return sources
+end
+
+local function find_glslc()
+    local vulkan_sdk = os.getenv("VULKAN_SDK")
+    local candidates = {}
+
+    if vulkan_sdk and vulkan_sdk ~= "" then
+        if is_windows then
+            candidates[#candidates + 1] = joinpath(vulkan_sdk, "Bin", "glslc.exe")
+        elseif is_macos then
+            candidates[#candidates + 1] = joinpath(vulkan_sdk, "macOS", "bin", "glslc")
+            candidates[#candidates + 1] = joinpath(vulkan_sdk, "bin", "glslc")
+        else
+            candidates[#candidates + 1] = joinpath(vulkan_sdk, "bin", "glslc")
+        end
+    end
+
+    for _, candidate in ipairs(candidates) do
+        if file_exists(candidate) then
+            return candidate
+        end
+    end
+
+    return is_windows and "glslc.exe" or "glslc"
+end
+
+local function compile_shaders(project_root)
+    local shaders, discover_err = discover_shader_sources(project_root)
+    if not shaders then
+        return false, discover_err
+    end
+    if #shaders == 0 then
+        return false, "No shaders found under shaders/ (*.vert, *.frag)"
+    end
+
+    local glslc = find_glslc()
+    for _, shader_src in ipairs(shaders) do
+        local cmd = command_to_string({ glslc, shader_src, "-o", shader_src .. ".spv" })
+        local ok, err = execute_in_dir(project_root, cmd)
+        if not ok then
+            return false, "Shader compilation failed for " .. shader_src .. " (" .. err .. ")"
+        end
+    end
+
+    return true
+end
+
 local function is_debug_build()
     local mode = os.getenv("ODINGAME_BUILD_MODE")
     if mode then
@@ -201,32 +324,23 @@ local function run_build(project_root)
         return false, "Could not create bin directory"
     end
 
+    local shaders_ok, shaders_err = compile_shaders(project_root)
+    if not shaders_ok then
+        return false, shaders_err
+    end
+
     local build_cmd, build_error = get_build_command(project_root)
     if not build_cmd then
         return false, build_error
     end
 
     local command = command_to_string(build_cmd)
-    local run_cmd
-    if is_windows then
-        run_cmd = "cd /d " .. shell_escape(project_root) .. " && " .. command
-    else
-        run_cmd = "cd " .. shell_escape(project_root) .. " && " .. command
-    end
-
-    local success, reason, code = os.execute(run_cmd)
-    if success == true or success == 0 then
+    local success, err = execute_in_dir(project_root, command)
+    if success then
         return true
     end
 
-    if type(code) == "number" then
-        return false, "Build failed with exit code " .. code
-    end
-    if type(reason) == "string" and reason ~= "" then
-        return false, "Build failed: " .. reason
-    end
-
-    return false, "Build failed"
+    return false, "Build failed (" .. err .. ")"
 end
 
 function M.get_build_command(project_root)
