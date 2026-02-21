@@ -5,7 +5,7 @@ import "core:os"
 import "core:fmt"
 import glfw "vendor:glfw"
 import vk "vendor:vulkan"
-import shared "app:shared"
+import shared "../shared"
 
 when ODIN_OS == .Windows {
 	foreign import vulkan "system:vulkan-1.lib"

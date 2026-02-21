@@ -148,42 +148,6 @@ local function open_run_terminal(cmd_array)
     vim.cmd("startinsert")
 end
 
-local function build_and_run()
-    vim.cmd("wall")
-    vim.notify("Building app...")
-
-    local build, build_module_error = get_build_module()
-    if not build then
-        vim.notify(build_module_error, vim.log.levels.ERROR)
-        return
-    end
-
-    vim.fn.mkdir(joinpath(project_root, "bin"), "p")
-    local build_cmd, build_error = build.get_build_command(project_root)
-    if not build_cmd then
-        vim.notify(build_error, vim.log.levels.ERROR)
-        return
-    end
-
-    vim.system(build_cmd, { cwd = project_root, text = true }, function(res)
-        vim.schedule(function()
-            if res.code ~= 0 then
-                local output = (res.stderr and res.stderr ~= "") and res.stderr or (res.stdout or "")
-                vim.notify("Build failed:\n" .. output, vim.log.levels.ERROR)
-                return
-            end
-
-            if uv.fs_stat(program_path) == nil then
-                vim.notify("Build succeeded but executable not found: " .. program_path, vim.log.levels.ERROR)
-                return
-            end
-
-            vim.notify("Build succeeded. Running app...")
-            open_run_terminal({ program_path })
-        end)
-    end)
-end
-
 local function build_with_compile_mode()
     if vim.fn.exists(":Compile") == 0 then
         vim.notify("compile-mode.nvim is not available (:Compile missing)", vim.log.levels.ERROR)
@@ -229,6 +193,36 @@ local function build_with_compile_mode()
     end)
 end
 
+local function build_game_dll_only_with_compile_mode()
+    if vim.fn.exists(":Compile") == 0 then
+        vim.notify("compile-mode.nvim is not available (:Compile missing)", vim.log.levels.ERROR)
+        return
+    end
+
+    vim.cmd("wall")
+
+    local build, build_module_error = get_build_module()
+    if not build then
+        vim.notify(build_module_error, vim.log.levels.ERROR)
+        return
+    end
+
+    if type(build.get_game_build_command) ~= "function" then
+        vim.notify("build.lua must expose get_game_build_command()", vim.log.levels.ERROR)
+        return
+    end
+
+    vim.fn.mkdir(joinpath(project_root, "bin"), "p")
+
+    local game_build_cmd, game_build_error = build.get_game_build_command(project_root)
+    if not game_build_cmd then
+        vim.notify(game_build_error, vim.log.levels.ERROR)
+        return
+    end
+
+    vim.cmd("Compile " .. command_to_string(game_build_cmd))
+end
+
 local function stop_debug_session()
     if dap.session() == nil then
         return
@@ -239,22 +233,32 @@ local function stop_debug_session()
     dap_view.close()
 end
 
-vim.keymap.set("n", "<leader>de", build_and_debug, {
+vim.keymap.set("n", "<leader>bd", build_and_debug, {
     desc = "Build + debug app",
     silent = true,
 })
 
-vim.keymap.set("n", "<leader>dr", build_and_run, {
-    desc = "Build + run app",
+vim.keymap.set("n", "<F6>", build_and_debug, {
+    desc = "Build + debug app",
     silent = true,
 })
 
-vim.keymap.set("n", "<leader>cb", build_with_compile_mode, {
+vim.keymap.set("n", "<leader>bb", build_with_compile_mode, {
     desc = "Build app + game DLL (compile-mode)",
     silent = true,
 })
 
-vim.keymap.set("n", "<leader>dq", stop_debug_session, {
-    desc = "Stop debug session",
+vim.keymap.set("n", "<F5>", build_with_compile_mode, {
+    desc = "Build app + game DLL (compile-mode)",
+    silent = true,
+})
+
+vim.keymap.set("n", "<leader>bg", build_game_dll_only_with_compile_mode, {
+    desc = "Build game DLL only (compile-mode)",
+    silent = true,
+})
+
+vim.keymap.set("n", "<F7>", build_game_dll_only_with_compile_mode, {
+    desc = "Build game DLL only (compile-mode)",
     silent = true,
 })

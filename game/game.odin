@@ -1,6 +1,6 @@
 package game
 
-import shared "app:shared"
+import shared "../shared"
 import "core:math"
 
 Game_State :: struct {

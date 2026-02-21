@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OdinGame — Engine Architecture & Render Pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:ital,wght@0,400;0,700&display=swap" rel="stylesheet">
+<style>
+/* ── THEME ─────────────────────────────────────────── */
+:root {
+  --font-body: 'Space Grotesk', system-ui, sans-serif;
+  --font-mono: 'Space Mono', 'SF Mono', Consolas, monospace;
+
+  /* dark-first: deep blueprint navy */
+  --bg:           #03081a;
+  --surface:      #07102a;
+  --surface2:     #0d1a3a;
+  --border:       rgba(100, 140, 230, 0.10);
+  --border-bright:rgba(100, 140, 230, 0.22);
+  --text:         #c8d8f0;
+  --text-dim:     #526490;
+
+  --c-engine:     #818cf8;
+  --c-engine-dim: rgba(129,140,248,0.10);
+  --c-game:       #34d399;
+  --c-game-dim:   rgba(52,211,153,0.08);
+  --c-shared:     #fbbf24;
+  --c-shared-dim: rgba(251,191,36,0.08);
+  --c-vulkan:     #38bdf8;
+  --c-vulkan-dim: rgba(56,189,248,0.08);
+  --c-hot:        #fb7185;
+  --c-hot-dim:    rgba(251,113,133,0.10);
+  --c-shader:     #c084fc;
+  --c-shader-dim: rgba(192,132,252,0.08);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg:           #f0f4ff;
+    --surface:      #ffffff;
+    --surface2:     #edf0ff;
+    --border:       rgba(80,100,200,0.12);
+    --border-bright:rgba(80,100,200,0.25);
+    --text:         #1a2040;
+    --text-dim:     #4a5890;
+    --c-engine:     #4f46e5;
+    --c-engine-dim: rgba(79,70,229,0.08);
+    --c-game:       #059669;
+    --c-game-dim:   rgba(5,150,105,0.08);
+    --c-shared:     #b45309;
+    --c-shared-dim: rgba(180,83,9,0.08);
+    --c-vulkan:     #0369a1;
+    --c-vulkan-dim: rgba(3,105,161,0.08);
+    --c-hot:        #be123c;
+    --c-hot-dim:    rgba(190,18,60,0.07);
+    --c-shader:     #7c3aed;
+    --c-shader-dim: rgba(124,58,237,0.07);
+  }
+}
+
+/* ── RESET ──────────────────────────────────────────── */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 44px 44px;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.6;
+  padding: 52px 28px 72px;
+  min-height: 100vh;
+}
+
+/* ── ANIMATION ──────────────────────────────────────── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate {
+  animation: fadeUp 0.45s ease-out both;
+  animation-delay: calc(var(--i, 0) * 0.09s);
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate { animation: none; }
+}
+
+/* ── LAYOUT ─────────────────────────────────────────── */
+.container { max-width: 1120px; margin: 0 auto; }
+
+/* ── HEADER ─────────────────────────────────────────── */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--c-engine);
+  margin-bottom: 10px;
+}
+
+h1 {
+  font-size: 48px;
+  font-weight: 700;
+  letter-spacing: -2px;
+  line-height: 1.05;
+  margin-bottom: 8px;
+}
+
+.subtitle {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 28px;
+  letter-spacing: 0.04em;
+}
+
+/* ── BADGE ROW ──────────────────────────────────────── */
+.badges {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 44px;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  padding: 4px 11px;
+  border-radius: 20px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+.badge-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.badge.engine { color:var(--c-engine); border-color:var(--c-engine); background:var(--c-engine-dim); }
+.badge.game   { color:var(--c-game);   border-color:var(--c-game);   background:var(--c-game-dim); }
+.badge.shared { color:var(--c-shared); border-color:var(--c-shared); background:var(--c-shared-dim); }
+.badge.vulkan { color:var(--c-vulkan); border-color:var(--c-vulkan); background:var(--c-vulkan-dim); }
+.badge.hot    { color:var(--c-hot);    border-color:var(--c-hot);    background:var(--c-hot-dim); }
+.badge.shader { color:var(--c-shader); border-color:var(--c-shader); background:var(--c-shader-dim); }
+
+/* ── SECTIONS ───────────────────────────────────────── */
+.section { margin-bottom: 52px; }
+
+h2 {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  margin-bottom: 10px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+h2::before {
+  content: '';
+  display: block;
+  width: 3px;
+  height: 18px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.section.sec-arch h2::before   { background: var(--c-engine); }
+.section.sec-frame h2::before  { background: var(--c-vulkan); }
+.section.sec-notes h2::before  { background: var(--c-shared); }
+
+.section-desc {
+  font-size: 13px;
+  color: var(--text-dim);
+  max-width: 760px;
+  margin-bottom: 20px;
+  line-height: 1.75;
+}
+.section-desc code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--c-engine-dim);
+  color: var(--c-engine);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* ── MERMAID WRAP ───────────────────────────────────── */
+.mermaid-wrap {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 40px 28px;
+  overflow: auto;
+  margin-bottom: 12px;
+  min-height: 220px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.mermaid-wrap::-webkit-scrollbar { width: 6px; height: 6px; }
+.mermaid-wrap::-webkit-scrollbar-track { background: transparent; }
+.mermaid-wrap::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 3px; }
+
+.mermaid-wrap .mermaid {
+  display: flex;
+  justify-content: center;
+  transition: transform 0.18s ease;
+  transform-origin: top center;
+}
+.mermaid-wrap.is-zoomed  { cursor: grab; }
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+
+/* ── ZOOM CONTROLS ──────────────────────────────────── */
+.zoom-controls {
+  position: absolute;
+  top: 8px; right: 8px;
+  display: flex;
+  gap: 2px;
+  z-index: 10;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+}
+.zoom-controls button {
+  width: 28px; height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.14s, color 0.14s;
+}
+.zoom-controls button:hover { background: var(--border-bright); color: var(--text); }
+
+/* ── MERMAID SVG OVERRIDES ──────────────────────────── */
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 13px !important; }
+.mermaid .label     { font-family: var(--font-body) !important; font-size: 13px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 11px !important; }
+.mermaid .cluster-label text { font-family: var(--font-mono) !important; font-size: 11px !important; }
+
+/* ── NOTES GRID ─────────────────────────────────────── */
+.notes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+}
+.note {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-dim);
+  border-left: 3px solid;
+}
+.note-label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.note code {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 0 4px;
+  border-radius: 2px;
+}
+.note.engine { border-left-color: var(--c-engine); }
+.note.engine .note-label { color: var(--c-engine); }
+.note.engine code { background: var(--c-engine-dim); color: var(--c-engine); }
+.note.vulkan { border-left-color: var(--c-vulkan); }
+.note.vulkan .note-label { color: var(--c-vulkan); }
+.note.vulkan code { background: var(--c-vulkan-dim); color: var(--c-vulkan); }
+.note.hot { border-left-color: var(--c-hot); }
+.note.hot .note-label { color: var(--c-hot); }
+.note.hot code { background: var(--c-hot-dim); color: var(--c-hot); }
+.note.shader { border-left-color: var(--c-shader); }
+.note.shader .note-label { color: var(--c-shader); }
+.note.shader code { background: var(--c-shader-dim); color: var(--c-shader); }
+
+/* ── RESPONSIVE ─────────────────────────────────────── */
+@media (max-width: 768px) {
+  body { padding: 24px 16px; }
+  h1 { font-size: 30px; }
+  .mermaid-wrap { padding: 20px 14px; }
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- ── HEADER ───────────────────────────────────────── -->
+  <header>
+    <p class="eyebrow animate" style="--i:0">odin-lang &nbsp;·&nbsp; vulkan 1.3 &nbsp;·&nbsp; game engine</p>
+    <h1 class="animate" style="--i:1">OdinGame</h1>
+    <p class="subtitle animate" style="--i:2">engine architecture &amp; render pipeline</p>
+    <div class="badges animate" style="--i:3">
+      <span class="badge engine"><span class="badge-dot" style="background:var(--c-engine)"></span>engine/ — odingame.exe</span>
+      <span class="badge game"><span class="badge-dot" style="background:var(--c-game)"></span>game/ — game.dll (hot-reload)</span>
+      <span class="badge shared"><span class="badge-dot" style="background:var(--c-shared)"></span>shared/ — game_api.odin</span>
+      <span class="badge vulkan"><span class="badge-dot" style="background:var(--c-vulkan)"></span>Vulkan 1.3 Dynamic Rendering</span>
+      <span class="badge hot"><span class="badge-dot" style="background:var(--c-hot)"></span>Hot Reload</span>
+      <span class="badge shader"><span class="badge-dot" style="background:var(--c-shader)"></span>GLSL → SPIR-V</span>
+    </div>
+  </header>
+
+  <!-- ── SECTION 1: MODULE ARCHITECTURE ───────────────── -->
+  <section class="section sec-arch animate" style="--i:4">
+    <h2>Module Architecture</h2>
+    <p class="section-desc">
+      Three Odin packages communicate through a versioned ABI defined in <code>shared/game_api.odin</code>.
+      The engine owns all memory — the game DLL holds only code. <code>build.lua</code> orchestrates
+      shader compilation (GLSL→SPIR-V via glslc) and both package builds. Dashed lines show type imports;
+      solid lines show runtime data flow.
+    </p>
+
+    <div class="mermaid-wrap">
+      <div class="zoom-controls">
+        <button onclick="zoomDiagram(this,1.25)" title="Zoom in">+</button>
+        <button onclick="zoomDiagram(this,0.8)"  title="Zoom out">&minus;</button>
+        <button onclick="resetZoom(this)"         title="Reset">&#8634;</button>
+      </div>
+      <pre class="mermaid">
+graph LR
+    classDef buildCls   fill:#18102e,stroke:#a855f7,stroke-width:2px,color:#e9d5ff
+    classDef engineCls  fill:#0d1636,stroke:#818cf8,stroke-width:2px,color:#c7d2fe
+    classDef gameCls    fill:#042318,stroke:#34d399,stroke-width:2px,color:#a7f3d0
+    classDef sharedCls  fill:#1c1200,stroke:#fbbf24,stroke-width:2px,color:#fde68a
+    classDef gpuCls     fill:#031828,stroke:#38bdf8,stroke-width:2px,color:#bae6fd
+    classDef shaderCls  fill:#130a22,stroke:#c084fc,stroke-width:1.5px,color:#f0abfc
+
+    Build(["build.lua"]):::buildCls
+
+    subgraph SH ["shared/"]
+        SharedAPI["game_api.odin<br/>Engine_API · Game_API<br/>api_version: u32"]:::sharedCls
+    end
+
+    subgraph ENG ["engine/  →  odingame.exe"]
+        Main["main.odin<br/>Vulkan init + frame loop<br/>GpuContext · SwapchainContext"]:::engineCls
+        HotR["hot_reload.odin<br/>Game_Module<br/>dynlib.load/unload"]:::engineCls
+        Shaders["shaders/<br/>triangle.vert<br/>triangle.frag"]:::shaderCls
+    end
+
+    subgraph GAMEDLL ["game/  →  game.dll"]
+        GameCode["game.odin<br/>Game_State<br/>game_update()"]:::gameCls
+    end
+
+    GPU["Vulkan 1.3 GPU<br/>GpuContext · SwapchainContext<br/>Pipeline · CommandBuffer<br/>Semaphores · Fence"]:::gpuCls
+
+    Build -->|"glslc → .spv"| Shaders
+    Build -->|"odin build engine"| Main
+    Build -->|"odin build game -build-mode:dll"| GameCode
+
+    Shaders --> Main
+    Main -. "imports types" .-> SharedAPI
+    GameCode -. "imports types" .-> SharedAPI
+
+    HotR -->|"dynlib.load<br/>game_loaded.dll<br/>(file-watch mtime)"| GameCode
+    GameCode -->|"Engine_API fn ptrs<br/>draw_quad · set_clear_color<br/>log · get_dt · is_key_down"| Main
+
+    Main -->|"Frame_Commands<br/>record + submit"| GPU
+      </pre>
+    </div>
+  </section>
+
+  <!-- ── SECTION 2: FRAME LOOP ─────────────────────────── -->
+  <section class="section sec-frame animate" style="--i:5">
+    <h2>Per-Frame System Flow</h2>
+    <p class="section-desc">
+      Every iteration: GLFW events poll, the game DLL mtime is compared for hot-reload,
+      <code>game_update()</code> populates a <code>Frame_Commands</code> list, then Vulkan
+      records a command buffer using <em>dynamic rendering</em> — no render passes or framebuffer
+      objects. Quads use <code>PushConstants</code> and procedural vertex generation via
+      <code>gl_VertexIndex</code>; no vertex buffers are needed.
+    </p>
+
+    <div class="mermaid-wrap">
+      <div class="zoom-controls">
+        <button onclick="zoomDiagram(this,1.25)" title="Zoom in">+</button>
+        <button onclick="zoomDiagram(this,0.8)"  title="Zoom out">&minus;</button>
+        <button onclick="resetZoom(this)"         title="Reset">&#8634;</button>
+      </div>
+      <pre class="mermaid">
+flowchart TD
+    classDef normalCls    fill:#0d1636,stroke:#818cf8,stroke-width:1.5px,color:#c7d2fe
+    classDef hotCls       fill:#280810,stroke:#fb7185,stroke-width:2px,color:#fecdd3
+    classDef vulkanCls    fill:#031828,stroke:#38bdf8,stroke-width:1.5px,color:#bae6fd
+    classDef decisionCls  fill:#0e0c24,stroke:#a855f7,stroke-width:1.5px,color:#e9d5ff
+    classDef startCls     fill:#062818,stroke:#34d399,stroke-width:2px,color:#a7f3d0
+    classDef recreateCls  fill:#1c1200,stroke:#fbbf24,stroke-width:1.5px,color:#fde68a
+
+    FrameStart(["● Frame Start"]):::startCls
+    FrameStart --> Poll
+
+    Poll["glfw.PollEvents<br/>free_all temp_allocator<br/>clear frame_commands.quads<br/>Δt = now − prev_time"]:::normalCls
+
+    Poll --> DLLCheck
+    DLLCheck{"game.dll mtime<br/>changed?"}:::decisionCls
+
+    DLLCheck -- no --> GameUpdate
+    DLLCheck -- yes --> ReadBytes
+
+    ReadBytes["Read game.dll bytes<br/>into temp memory"]:::hotCls
+    ReadBytes --> DevWait
+
+    DevWait["vk.DeviceWaitIdle<br/>game_unload(api, memory)<br/>— serialize state"]:::hotCls
+    DevWait --> DynUnload
+
+    DynUnload["dynlib.unload_library<br/>clear Game_Module.api"]:::hotCls
+    DynUnload --> WriteLoad
+
+    WriteLoad["Write bytes → game_loaded.dll<br/>dynlib.load_library<br/>(releases lock on game.dll)"]:::hotCls
+    WriteLoad --> BindSyms
+
+    BindSyms["Bind exported symbols:<br/>game_get_api_version<br/>game_get_memory_size<br/>game_load / update / unload / reload"]:::hotCls
+    BindSyms --> VerAPI
+
+    VerAPI{"API version<br/>match?<br/>engine == game"}:::decisionCls
+    VerAPI -- "no → log warn" --> Poll
+    VerAPI -- yes --> GameReload
+
+    GameReload["game_reload(api, memory)<br/>state.reload_count++<br/>— restore live state"]:::hotCls
+    GameReload --> GameUpdate
+
+    GameUpdate["game_update(api, memory)<br/>— reads/writes Game_State<br/>— calls api.set_clear_color()<br/>— calls api.draw_quad() N times<br/>→ produces Frame_Commands"]:::normalCls
+    GameUpdate --> WaitFence
+
+    WaitFence["WaitForFences<br/>in_flight_fence<br/>(infinite timeout)"]:::vulkanCls
+    WaitFence --> Acquire
+
+    Acquire["AcquireNextImageKHR<br/>wait: image_available_semaphore<br/>→ image_index"]:::vulkanCls
+    Acquire --> AcqR
+
+    AcqR{"acquire<br/>result?"}:::decisionCls
+    AcqR -- SUCCESS --> RstCmd
+    AcqR -- "SUBOPTIMAL / OUT_OF_DATE" --> RecreateA
+
+    RecreateA["recreate_swapchain<br/>+ create_graphics_pipeline<br/>+ recreate semaphores"]:::recreateCls
+    RecreateA --> FrameStart
+
+    RstCmd["vk.ResetCommandBuffer<br/>vk.BeginCommandBuffer"]:::vulkanCls
+    RstCmd --> Barrier1
+
+    Barrier1["Pipeline Barrier (Sync2)<br/>UNDEFINED<br/>→ COLOR_ATTACHMENT_OPTIMAL<br/>srcStage: TOP_OF_PIPE<br/>dstStage: COLOR_ATTACHMENT_OUTPUT"]:::vulkanCls
+    Barrier1 --> BeginRender
+
+    BeginRender["CmdBeginRendering<br/>colorAttachment: image_view<br/>loadOp: CLEAR → clear_color<br/>storeOp: STORE"]:::vulkanCls
+    BeginRender --> BindPipe
+
+    BindPipe["CmdBindPipeline GRAPHICS<br/>CmdSetViewport<br/>CmdSetScissor"]:::vulkanCls
+    BindPipe --> QuadLoop
+
+    QuadLoop["For each Quad_Command in Frame_Commands:<br/>CmdPushConstants(rect[4], color[4])<br/>CmdDraw(6 verts, gl_VertexIndex → NDC)<br/>no VBO — procedural in vertex shader"]:::vulkanCls
+    QuadLoop --> EndRender
+
+    EndRender["CmdEndRendering"]:::vulkanCls
+    EndRender --> Barrier2
+
+    Barrier2["Pipeline Barrier (Sync2)<br/>COLOR_ATTACHMENT_OPTIMAL<br/>→ PRESENT_SRC_KHR<br/>srcStage: COLOR_ATTACHMENT_OUTPUT<br/>dstStage: BOTTOM_OF_PIPE"]:::vulkanCls
+    Barrier2 --> EndCmd
+
+    EndCmd["vk.EndCommandBuffer"]:::vulkanCls
+    EndCmd --> ResetFence
+
+    ResetFence["vk.ResetFences in_flight_fence"]:::vulkanCls
+    ResetFence --> Submit
+
+    Submit["QueueSubmit (graphics queue)<br/>wait: image_available_semaphore<br/>stage: COLOR_ATTACHMENT_OUTPUT<br/>signal: render_finished_semaphore[image_index]<br/>fence: in_flight_fence"]:::vulkanCls
+    Submit --> Present
+
+    Present["QueuePresentKHR (present queue)<br/>wait: render_finished_semaphore[image_index]<br/>swapchain + image_index"]:::vulkanCls
+    Present --> PresR
+
+    PresR{"present<br/>result?"}:::decisionCls
+    PresR -- SUCCESS --> FrameStart
+    PresR -- "SUBOPTIMAL / OUT_OF_DATE" --> RecreateB
+
+    RecreateB["recreate_swapchain<br/>+ create_graphics_pipeline<br/>+ recreate semaphores"]:::recreateCls
+    RecreateB --> FrameStart
+      </pre>
+    </div>
+  </section>
+
+  <!-- ── SECTION 3: NOTES ──────────────────────────────── -->
+  <section class="section sec-notes animate" style="--i:6">
+    <h2>Key Design Notes</h2>
+    <div class="notes-grid">
+      <div class="note engine">
+        <div class="note-label">State-Persistent Hot Reload</div>
+        <p>Game state lives in an engine-allocated <code>[]byte</code> slice. The DLL owns
+        zero heap memory — only code. On reload, <code>game_reload(api, memory)</code> receives
+        the same pointer it left behind, so the live game state fully survives DLL swaps.</p>
+      </div>
+      <div class="note hot">
+        <div class="note-label">Shadow-Copy DLL Trick (Windows)</div>
+        <p>The engine copies <code>game.dll</code> → <code>game_loaded.dll</code> before
+        loading. This releases the OS file lock on the original, letting the Odin compiler
+        overwrite it while the engine is running — enabling zero-friction hot reload without
+        a build system dance.</p>
+      </div>
+      <div class="note vulkan">
+        <div class="note-label">Dynamic Rendering (VK 1.3)</div>
+        <p>No <code>VkRenderPass</code> or <code>VkFramebuffer</code> objects exist.
+        <code>CmdBeginRendering</code> takes attachment info inline. Swapchain recreation
+        only recreates the swapchain + pipeline — no framebuffer rebuild needed.</p>
+      </div>
+      <div class="note shader">
+        <div class="note-label">Procedural Quad Vertex Shader</div>
+        <p>The vertex shader contains 6 hardcoded unit-quad positions. <code>gl_VertexIndex</code>
+        indexes them at draw time, so <code>CmdDraw(6, 1, 0, 0)</code> needs no VBO.
+        <code>PushConstants</code> deliver <code>rect(xy+zw)</code> and <code>color</code>
+        per quad in NDC space.</p>
+      </div>
+      <div class="note vulkan">
+        <div class="note-label">Sync Primitives</div>
+        <p><code>image_available_semaphore</code> signals when the swapchain image is safe
+        to write. <code>render_finished_semaphores[image_index]</code> gates presentation.
+        <code>in_flight_fence</code> (pre-signaled) prevents the CPU from outrunning the GPU.</p>
+      </div>
+      <div class="note engine">
+        <div class="note-label">Versioned ABI</div>
+        <p><code>GAME_API_VERSION = 1</code> is checked on every reload. A mismatch
+        logs a warning and skips the reload — the engine keeps running with the previous
+        DLL unloaded, preventing crashes from incompatible structs.</p>
+      </div>
+    </div>
+  </section>
+
+</div><!-- /container -->
+
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const isDark = !window.matchMedia('(prefers-color-scheme: light)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'base',
+  look: 'classic',
+  layout: 'elk',
+  themeVariables: {
+    primaryColor:       isDark ? '#0d1636' : '#eef1ff',
+    primaryBorderColor: isDark ? '#818cf8' : '#4f46e5',
+    primaryTextColor:   isDark ? '#c7d2fe' : '#1a2040',
+    secondaryColor:     isDark ? '#031828' : '#e0f2fe',
+    secondaryBorderColor: isDark ? '#38bdf8' : '#0369a1',
+    secondaryTextColor: isDark ? '#bae6fd' : '#1a2040',
+    tertiaryColor:      isDark ? '#042318' : '#dcfce7',
+    tertiaryBorderColor:isDark ? '#34d399' : '#059669',
+    tertiaryTextColor:  isDark ? '#a7f3d0' : '#1a2040',
+    lineColor:          isDark ? '#2e3e6e' : '#8090c0',
+    background:         isDark ? '#07102a' : '#f0f4ff',
+    mainBkg:            isDark ? '#0d1636' : '#ffffff',
+    nodeBorder:         isDark ? '#818cf8' : '#4f46e5',
+    clusterBkg:         isDark ? '#080e20' : '#f4f6ff',
+    clusterBorder:      isDark ? '#1e2a50' : '#c0c8e8',
+    edgeLabelBackground:isDark ? '#07102a' : '#f0f4ff',
+    fontSize: '13px',
+    fontFamily: "'Space Grotesk', system-ui, sans-serif",
+    titleColor: isDark ? '#c7d2fe' : '#1a2040',
+  }
+});
+</script>
+
+<script>
+function updateZoomState(wrap) {
+  var t = wrap.querySelector('.mermaid');
+  wrap.classList.toggle('is-zoomed', parseFloat(t.dataset.zoom || '1') > 1);
+}
+function zoomDiagram(btn, factor) {
+  var wrap = btn.closest('.mermaid-wrap');
+  var t = wrap.querySelector('.mermaid');
+  var next = Math.min(Math.max((parseFloat(t.dataset.zoom || '1')) * factor, 0.25), 6);
+  t.dataset.zoom = next;
+  t.style.transform = 'scale(' + next + ')';
+  updateZoomState(wrap);
+}
+function resetZoom(btn) {
+  var wrap = btn.closest('.mermaid-wrap');
+  var t = wrap.querySelector('.mermaid');
+  t.dataset.zoom = '1';
+  t.style.transform = 'scale(1)';
+  updateZoomState(wrap);
+}
+document.querySelectorAll('.mermaid-wrap').forEach(function(wrap) {
+  /* Ctrl/Cmd + scroll to zoom */
+  wrap.addEventListener('wheel', function(e) {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    var t = wrap.querySelector('.mermaid');
+    var factor = e.deltaY < 0 ? 1.1 : 0.9;
+    var next = Math.min(Math.max((parseFloat(t.dataset.zoom || '1')) * factor, 0.25), 6);
+    t.dataset.zoom = next;
+    t.style.transform = 'scale(' + next + ')';
+    updateZoomState(wrap);
+  }, { passive: false });
+
+  /* drag to pan */
+  var startX, startY, scrollL, scrollT;
+  wrap.addEventListener('mousedown', function(e) {
+    if (e.target.closest('.zoom-controls')) return;
+    if (parseFloat(wrap.querySelector('.mermaid').dataset.zoom || '1') <= 1) return;
+    wrap.classList.add('is-panning');
+    startX = e.clientX; startY = e.clientY;
+    scrollL = wrap.scrollLeft; scrollT = wrap.scrollTop;
+  });
+  window.addEventListener('mousemove', function(e) {
+    if (!wrap.classList.contains('is-panning')) return;
+    wrap.scrollLeft = scrollL - (e.clientX - startX);
+    wrap.scrollTop  = scrollT - (e.clientY - startY);
+  });
+  window.addEventListener('mouseup', function() {
+    wrap.classList.remove('is-panning');
+  });
+});
+</script>
+
+</body>
+</html>

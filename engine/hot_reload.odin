@@ -2,7 +2,7 @@ package engine
 
 import "core:dynlib"
 import "core:os"
-import shared "app:shared"
+import shared "../shared"
 
 Game_Module :: struct {
 	dll_source_path: string,
