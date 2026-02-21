@@ -1,6 +1,7 @@
 package main
 
 import "core:mem"
+import "core:os"
 import glfw "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -676,4 +677,168 @@ main :: proc() {
 
 	log_infof("Logical device created, graphics family=%d", gpu_context.graphics_family_index)
 	log_infof("Swapchain created with %d images", len(swapchain_context.images))
+
+	// Loading the shader modules
+	vert_code, ok_vert := os.read_entire_file("shaders/triangle.vert.spv", context.temp_allocator)
+	frag_code, ok_frag := os.read_entire_file("shaders/triangles.frag.spv", context.temp_allocator)
+
+	if !ok_vert || !ok_frag {
+		log_error("Failed to load shaders from disk")
+		return
+	}
+
+	vert_module_info := vk.ShaderModuleCreateInfo {
+		sType    = .SHADER_MODULE_CREATE_INFO,
+		codeSize = len(vert_code),
+		pCode    = cast([^]u32)raw_data(vert_code),
+	}
+
+	frag_module_info := vk.ShaderModuleCreateInfo {
+		sType    = .SHADER_MODULE_CREATE_INFO,
+		codeSize = len(frag_code),
+		pCode    = cast([^]u32)raw_data(frag_code),
+	}
+
+	vert_module, frag_module: vk.ShaderModule
+	res_vert_module := vk.CreateShaderModule(
+		gpu_context.device,
+		&vert_module_info,
+		nil,
+		&vert_module,
+	)
+	res_frag_module := vk.CreateShaderModule(
+		gpu_context.device,
+		&frag_module_info,
+		nil,
+		&frag_module,
+	)
+
+	if res_vert_module != .SUCCESS || res_frag_module != .SUCCESS {
+		log_error("Failed to create shader modules from the loaded shader code")
+		return
+	}
+
+	// Building the pipeline
+	shader_stages := [2]vk.PipelineShaderStageCreateInfo {
+		{
+			sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+			stage = {.VERTEX},
+			module = vert_module,
+			pName = "main",
+		},
+		{
+			sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+			stage = {.FRAGMENT},
+			module = frag_module,
+			pName = "main",
+		},
+	}
+
+	// No vertex input for now (vertices are hardcoded in the vertex shader)
+	vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
+		sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+	}
+
+	// We're drawing a triangle list
+	input_asssembly := vk.PipelineInputAssemblyStateCreateInfo {
+		sType                  = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+		topology               = .TRIANGLE_LIST,
+		primitiveRestartEnable = false,
+	}
+
+	// Viewport and scisso will be set dynamically
+	viewport_state := vk.PipelineViewportStateCreateInfo {
+		sType         = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+		viewportCount = 1,
+		scissorCount  = 1,
+	}
+
+	dynamic_states := [2]vk.DynamicState{.VIEWPORT, .SCISSOR}
+
+	dynamic_state := vk.PipelineDynamicStateCreateInfo {
+		sType             = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+		dynamicStateCount = u32(len(dynamic_states)),
+		pDynamicStates    = raw_data(&dynamic_states),
+	}
+
+	rasterizer := vk.PipelineRasterizationStateCreateInfo {
+		sType                   = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+		depthClampEnable        = false,
+		rasterizerDiscardEnable = false,
+		polygonMode             = .FILL,
+		cullMode                = {.BACK},
+		frontFace               = .CLOCKWISE,
+		depthBiasEnable         = false,
+		lineWidth               = 1.0,
+	}
+
+	// Multisampling (disabled for now)
+	multisampling := vk.PipelineMultisampleStateCreateInfo {
+		sType                = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+		rasterizationSamples = {._1},
+		sampleShadingEnable  = false,
+	}
+
+	// Color blending (no blending - just write the fragment color)
+	colorblend_attachment := vk.PipelineColorBlendAttachmentState {
+		blendEnable    = false,
+		colorWriteMask = {.R, .G, .B, .A},
+	}
+
+	color_blending := vk.PipelineColorBlendStateCreateInfo {
+		sType           = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		logicOpEnable   = false,
+		attachmentCount = 1,
+		pAttachments    = &colorblend_attachment,
+	}
+
+	// Pipeline layout (no descriptor sets or push constants yet)
+	pipeline_layout_info := vk.PipelineLayoutCreateInfo {
+		sType = .PIPELINE_LAYOUT_CREATE_INFO,
+	}
+
+	pipeline_layout: vk.PipelineLayout
+	if vk.CreatePipelineLayout(gpu_context.device, &pipeline_layout_info, nil, &pipeline_layout) !=
+	   .SUCCESS {
+		log_error("Failed to create the Vulkan pipeline layout")
+		return
+	}
+
+	// For dynamic rendering, we specify the color attachment format here
+	// instead of referencing a VkRenderPass
+	rendering_info := vk.PipelineRenderingCreateInfo {
+		sType                   = .PIPELINE_RENDERING_CREATE_INFO,
+		colorAttachmentCount    = 1,
+		pColorAttachmentFormats = &swapchain_context.image_format,
+	}
+
+	// AVENGERS, ASSEMBLE!
+	pipeline_info := vk.GraphicsPipelineCreateInfo {
+		sType               = .GRAPHICS_PIPELINE_CREATE_INFO,
+		pNext               = &rendering_info,
+		stageCount          = u32(len(shader_stages)),
+		pStages             = raw_data(&shader_stages),
+		pVertexInputState   = &vertex_input_info,
+		pInputAssemblyState = &input_asssembly,
+		pViewportState      = &viewport_state,
+		pRasterizationState = &rasterizer,
+		pMultisampleState   = &multisampling,
+		pColorBlendState    = &color_blending,
+		pDynamicState       = &dynamic_state,
+		layout              = pipeline_layout,
+	}
+
+	graphics_pipeline: vk.Pipeline
+	if vk.CreateGraphicsPipelines(
+		   gpu_context.device,
+		   vk.PipelineCache(0),
+		   1,
+		   &pipeline_info,
+		   nil,
+		   &graphics_pipeline,
+	   ) !=
+	   .SUCCESS {
+		log_error("Failed to create the Vulkan graphics pipeline")
+		return
+	}
 }
