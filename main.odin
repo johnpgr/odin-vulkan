@@ -169,9 +169,15 @@ create_gpu_context :: proc(
 		dynamicRendering = true,
 	}
 
+	synchronization2_feature := vk.PhysicalDeviceSynchronization2Features {
+		sType            = .PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES,
+		pNext            = &dynamic_rendering_feature,
+		synchronization2 = true,
+	}
+
 	features2 := vk.PhysicalDeviceFeatures2 {
 		sType    = .PHYSICAL_DEVICE_FEATURES_2,
-		pNext    = &dynamic_rendering_feature,
+		pNext    = &synchronization2_feature,
 		features = device_features,
 	}
 
@@ -519,6 +525,45 @@ destroy_swapchain_context :: proc(device: vk.Device, swapchain_context: ^Swapcha
 	swapchain_context^ = {}
 }
 
+create_render_finished_semaphores :: proc(
+	device: vk.Device,
+	count: int,
+) -> (
+	[]vk.Semaphore,
+	bool,
+) {
+	semaphore_create_info := vk.SemaphoreCreateInfo {
+		sType = .SEMAPHORE_CREATE_INFO,
+	}
+
+	semaphores := make([]vk.Semaphore, count, context.allocator)
+	for i in 0 ..< count {
+		if vk.CreateSemaphore(device, &semaphore_create_info, nil, &semaphores[i]) != .SUCCESS {
+			for destroy_i in 0 ..< i {
+				vk.DestroySemaphore(device, semaphores[destroy_i], nil)
+			}
+			delete(semaphores, context.allocator)
+			return nil, false
+		}
+	}
+
+	return semaphores, true
+}
+
+destroy_render_finished_semaphores :: proc(
+	device: vk.Device,
+	semaphores: ^[]vk.Semaphore,
+) {
+	for semaphore in semaphores^ {
+		vk.DestroySemaphore(device, semaphore, nil)
+	}
+
+	if len(semaphores^) > 0 {
+		delete(semaphores^, context.allocator)
+	}
+	semaphores^ = nil
+}
+
 recreate_swapchain :: proc(
 	device: vk.Device,
 	physical_device: vk.PhysicalDevice,
@@ -824,6 +869,7 @@ recreate_swapchain_and_pipeline :: proc(
 	shader_stages: []vk.PipelineShaderStageCreateInfo,
 	pipeline_layout: ^vk.PipelineLayout,
 	graphics_pipeline: ^vk.Pipeline,
+	render_finished_semaphores: ^[]vk.Semaphore,
 ) -> bool {
 	if !recreate_swapchain(
 		device,
@@ -850,6 +896,15 @@ recreate_swapchain_and_pipeline :: proc(
 
 	graphics_pipeline^ = new_graphics_pipeline
 	pipeline_layout^ = new_pipeline_layout
+
+	destroy_render_finished_semaphores(device, render_finished_semaphores)
+
+	new_render_finished_semaphores, ok_render_finished_semaphores :=
+		create_render_finished_semaphores(device, len(swapchain_context.images))
+	if !ok_render_finished_semaphores {
+		return false
+	}
+	render_finished_semaphores^ = new_render_finished_semaphores
 
 	return true
 }
@@ -979,7 +1034,6 @@ main :: proc() {
 		return
 	}
 	defer {
-		vk.DeviceWaitIdle(gpu_context.device)
 		destroy_swapchain_context(gpu_context.device, &swapchain_context)
 		swapchain_memory_reset(swapchain_allocator)
 	}
@@ -1028,6 +1082,7 @@ main :: proc() {
 
 	// Allocate a command buffer from the pool
 	alloc_info := vk.CommandBufferAllocateInfo {
+		sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
 		commandPool        = command_pool,
 		level              = .PRIMARY,
 		commandBufferCount = 1,
@@ -1052,24 +1107,22 @@ main :: proc() {
 		&image_available_semaphore,
 	)
 
-	render_finished_semaphore: vk.Semaphore
-	render_finished_semaphore_info := vk.SemaphoreCreateInfo {
-		sType = .SEMAPHORE_CREATE_INFO,
-	}
-
-	res_render_finished_semaphore := vk.CreateSemaphore(
-		gpu_context.device,
-		&render_finished_semaphore_info,
-		nil,
-		&render_finished_semaphore,
-	)
-
-	if res_image_available_semaphore != .SUCCESS || res_render_finished_semaphore != .SUCCESS {
+	if res_image_available_semaphore != .SUCCESS {
 		log_error("Failed to create Vulkan frame synchronization semaphores")
 		return
 	}
+
+	render_finished_semaphores, ok_render_finished_semaphores :=
+		create_render_finished_semaphores(gpu_context.device, len(swapchain_context.images))
+	if !ok_render_finished_semaphores {
+		log_error("Failed to create Vulkan render-finished semaphores")
+		return
+	}
 	defer vk.DestroySemaphore(gpu_context.device, image_available_semaphore, nil)
-	defer vk.DestroySemaphore(gpu_context.device, render_finished_semaphore, nil)
+	defer destroy_render_finished_semaphores(
+		gpu_context.device,
+		&render_finished_semaphores,
+	)
 
 	in_flight_fence: vk.Fence
 	in_flight_fence_info := vk.FenceCreateInfo {
@@ -1083,6 +1136,7 @@ main :: proc() {
 		return
 	}
 	defer vk.DestroyFence(gpu_context.device, in_flight_fence, nil)
+	defer vk.DeviceWaitIdle(gpu_context.device)
 
 	// We can finally render
 	for !glfw.WindowShouldClose(window) {
@@ -1137,6 +1191,7 @@ main :: proc() {
 				shader_stages[:],
 				&pipeline_layout,
 				&graphics_pipeline,
+				&render_finished_semaphores,
 			) {
 				log_error("Failed to recreate swapchain/pipeline after acquire")
 				return
@@ -1175,6 +1230,7 @@ main :: proc() {
 
 		// Submit the commands
 		wait_stages := vk.PipelineStageFlags{.COLOR_ATTACHMENT_OUTPUT}
+		render_finished_semaphore := render_finished_semaphores[image_index]
 
 		submit_info := vk.SubmitInfo {
 			sType                = .SUBMIT_INFO,
@@ -1218,6 +1274,7 @@ main :: proc() {
 				shader_stages[:],
 				&pipeline_layout,
 				&graphics_pipeline,
+				&render_finished_semaphores,
 			) {
 				log_error("Failed to recreate swapchain/pipeline after present")
 				return
