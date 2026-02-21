@@ -1,10 +1,11 @@
-package main
+package engine
 
 import "core:mem"
 import "core:os"
 import "core:fmt"
 import glfw "vendor:glfw"
 import vk "vendor:vulkan"
+import shared "app:shared"
 
 when ODIN_OS == .Windows {
 	foreign import vulkan "system:vulkan-1.lib"
@@ -322,6 +323,86 @@ SwapchainContext :: struct {
 	extent:       vk.Extent2D,
 }
 
+surface_format_supports_usage :: proc(
+	physical_device: vk.PhysicalDevice,
+	format: vk.Format,
+	usage: vk.ImageUsageFlags,
+) -> bool {
+	props: vk.ImageFormatProperties
+	return vk.GetPhysicalDeviceImageFormatProperties(
+		physical_device,
+		format,
+		.D2,
+		.OPTIMAL,
+		usage,
+		{},
+		&props,
+	) == .SUCCESS
+}
+
+Quad_Command :: struct {
+	rect:  [4]f32,
+	color: [4]f32,
+}
+
+Frame_Commands :: struct {
+	clear_color: [4]f32,
+	quads:       [dynamic]Quad_Command,
+}
+
+App_Callback_Context :: struct {
+	commands: ^Frame_Commands,
+	window:   glfw.WindowHandle,
+	dt:       f32,
+}
+
+@(private)
+_app_callback_context: App_Callback_Context
+
+engine_draw_quad :: proc(x, y, width, height: f32, r, g, b, a: f32) {
+	if _app_callback_context.commands == nil {
+		return
+	}
+
+	append(&_app_callback_context.commands.quads, Quad_Command {
+		rect  = {x, y, width, height},
+		color = {r, g, b, a},
+	})
+}
+
+engine_set_clear_color :: proc(r, g, b, a: f32) {
+	if _app_callback_context.commands == nil {
+		return
+	}
+	_app_callback_context.commands.clear_color = {r, g, b, a}
+}
+
+engine_log :: proc(message: string) {
+	log_infof("[game] %s", message)
+}
+
+engine_get_dt :: proc() -> f32 {
+	return _app_callback_context.dt
+}
+
+engine_is_key_down :: proc(key: i32) -> bool {
+	if _app_callback_context.window == nil {
+		return false
+	}
+	return glfw.GetKey(_app_callback_context.window, key) == glfw.PRESS
+}
+
+make_engine_api :: proc() -> shared.Engine_API {
+	return shared.Engine_API {
+		api_version      = shared.GAME_API_VERSION,
+		draw_quad        = engine_draw_quad,
+		set_clear_color  = engine_set_clear_color,
+		log              = engine_log,
+		get_dt           = engine_get_dt,
+		is_key_down      = engine_is_key_down,
+	}
+}
+
 // Query the surface capabilities to decide the
 // image format, resolution, and present mode
 // then create the swap chain.
@@ -387,12 +468,49 @@ create_swapchain_context :: proc(
 		return {}, false
 	}
 
-	// Choose a surface format - prefer SRGB w/ B8G8R8A8 layout
+	image_usage := vk.ImageUsageFlags{.COLOR_ATTACHMENT}
+
+	validation_usage := image_usage
+	if .TRANSFER_SRC in capabilities.supportedUsageFlags {
+		validation_usage += {.TRANSFER_SRC}
+	}
+	if .STORAGE in capabilities.supportedUsageFlags {
+		validation_usage += {.STORAGE}
+	}
+
+	// Choose a surface format, preferring SRGB, but only when image usage is supported.
 	chosen_format := formats[0] // fallback
+	found_compatible := false
+
 	for f in formats {
-		if f.format == .B8G8R8A8_SRGB && f.colorSpace == .SRGB_NONLINEAR {
+		if f.format == .B8G8R8A8_SRGB &&
+		   f.colorSpace == .SRGB_NONLINEAR &&
+		   surface_format_supports_usage(physical_device, f.format, validation_usage) {
 			chosen_format = f
+			found_compatible = true
 			break
+		}
+	}
+
+	if !found_compatible {
+		for f in formats {
+			if f.format == .B8G8R8A8_UNORM &&
+			   f.colorSpace == .SRGB_NONLINEAR &&
+			   surface_format_supports_usage(physical_device, f.format, validation_usage) {
+				chosen_format = f
+				found_compatible = true
+				break
+			}
+		}
+	}
+
+	if !found_compatible {
+		for f in formats {
+			if surface_format_supports_usage(physical_device, f.format, validation_usage) {
+				chosen_format = f
+				found_compatible = true
+				break
+			}
 		}
 	}
 
@@ -429,7 +547,7 @@ create_swapchain_context :: proc(
 		// Layers per image (1 for regular 2D rendering).
 		imageArrayLayers = 1,
 		// Intended usage of swapchain images.
-		imageUsage       = {.COLOR_ATTACHMENT},
+		imageUsage       = image_usage,
 		// Queue ownership mode for image access.
 		imageSharingMode = .EXCLUSIVE,
 		// Transform applied when presenting (e.g., rotation).
@@ -598,6 +716,7 @@ record_command_buffer :: proc(
 	extent: vk.Extent2D,
 	pipeline: vk.Pipeline,
 	layout: vk.PipelineLayout,
+	commands: ^Frame_Commands,
 ) -> bool {
 	cmd_begin_info := vk.CommandBufferBeginInfo {
 		sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -628,8 +747,9 @@ record_command_buffer :: proc(
 
 	vk.CmdPipelineBarrier2(cmd, &dependency_info)
 
+	clear := commands.clear_color
 	clear_value := vk.ClearValue {
-		color = vk.ClearColorValue{float32 = {0.0, 0.0, 0.0, 1.0}},
+		color = vk.ClearColorValue{float32 = {clear[0], clear[1], clear[2], clear[3]}},
 	}
 
 	// Define the color attachment for dynamic rendering
@@ -662,8 +782,18 @@ record_command_buffer :: proc(
 	rect := vk.Rect2D{{0, 0}, extent}
 	vk.CmdSetScissor(cmd, 0, 1, &rect)
 
-	// Draw the triangle! (3 vertices, 1 instance, no offsets)
-	vk.CmdDraw(cmd, 3, 1, 0, 0)
+	for i in 0 ..< len(commands.quads) {
+		quad := &commands.quads[i]
+		vk.CmdPushConstants(
+			cmd,
+			layout,
+			{.VERTEX, .FRAGMENT},
+			0,
+			u32(size_of(Quad_Command)),
+			quad,
+		)
+		vk.CmdDraw(cmd, 6, 1, 0, 0)
+	}
 
 	vk.CmdEndRendering(cmd)
 
@@ -702,6 +832,26 @@ has_suffix :: proc(value: string, suffix: string) -> bool {
 	return value[len(value)-len(suffix):] == suffix
 }
 
+game_library_source_path :: proc() -> string {
+	when ODIN_OS == .Windows {
+		return "bin/game.dll"
+	} else when ODIN_OS == .Darwin {
+		return "bin/libgame.dylib"
+	} else {
+		return "bin/libgame.so"
+	}
+}
+
+game_library_loaded_path :: proc() -> string {
+	when ODIN_OS == .Windows {
+		return "bin/game_loaded.dll"
+	} else when ODIN_OS == .Darwin {
+		return "bin/libgame_loaded.dylib"
+	} else {
+		return "bin/libgame_loaded.so"
+	}
+}
+
 load_shader :: proc(
 	device: vk.Device,
 	shader_name: string,
@@ -720,7 +870,7 @@ load_shader :: proc(
 		return {}, {}, false
 	}
 
-	shader_path := fmt.tprintf("shaders/%s.spv", shader_name)
+	shader_path := fmt.tprintf("engine/shaders/%s.spv", shader_name)
 	shader_code, ok_shader := os.read_entire_file(shader_path, context.temp_allocator)
 	if !ok_shader {
 		log_errorf("Failed to load shader from disk: %s", shader_path)
@@ -811,8 +961,16 @@ create_graphics_pipeline :: proc(
 		pAttachments    = &colorblend_attachment,
 	}
 
+	push_constant_range := vk.PushConstantRange {
+		stageFlags = {.VERTEX, .FRAGMENT},
+		offset     = 0,
+		size       = u32(size_of(Quad_Command)),
+	}
+
 	pipeline_layout_info := vk.PipelineLayoutCreateInfo {
-		sType = .PIPELINE_LAYOUT_CREATE_INFO,
+		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
+		pushConstantRangeCount = 1,
+		pPushConstantRanges    = &push_constant_range,
 	}
 
 	pipeline_layout: vk.PipelineLayout
@@ -1138,10 +1296,96 @@ main :: proc() {
 	defer vk.DestroyFence(gpu_context.device, in_flight_fence, nil)
 	defer vk.DeviceWaitIdle(gpu_context.device)
 
+	frame_commands := Frame_Commands {
+		clear_color = {0.0, 0.0, 0.0, 1.0},
+		quads       = make([dynamic]Quad_Command, context.allocator),
+	}
+	defer delete(frame_commands.quads)
+
+	engine_api := make_engine_api()
+
+	game_module := Game_Module {
+		dll_source_path = game_library_source_path(),
+		dll_loaded_path = game_library_loaded_path(),
+	}
+
+	if !load_game_module(&game_module) {
+		log_error("Failed to load game module")
+		return
+	}
+	defer unload_game_module(&game_module)
+
+	game_memory_size := game_module.api.get_memory_size()
+	if game_memory_size <= 0 {
+		log_error("Game returned invalid memory size")
+		return
+	}
+
+	game_memory := make([]byte, game_memory_size, context.allocator)
+	defer delete(game_memory, context.allocator)
+
+	game_module.api.load(&engine_api, raw_data(game_memory), len(game_memory))
+	defer {
+		if game_module.is_loaded && game_module.api.unload != nil {
+			game_module.api.unload(&engine_api, raw_data(game_memory), len(game_memory))
+		}
+	}
+
+	prev_time := f32(glfw.GetTime())
+
 	// We can finally render
 	for !glfw.WindowShouldClose(window) {
 		free_all(context.temp_allocator)
+		clear(&frame_commands.quads)
 		glfw.PollEvents()
+
+		now := f32(glfw.GetTime())
+		dt := now - prev_time
+		if dt < 0 {
+			dt = 0
+		}
+		prev_time = now
+
+		_app_callback_context = App_Callback_Context {
+			commands = &frame_commands,
+			window   = window,
+			dt       = dt,
+		}
+
+		if game_module_changed(&game_module) {
+			staged_game_dll, ok_stage := os.read_entire_file(
+				game_module.dll_source_path,
+				context.temp_allocator,
+			)
+			if !ok_stage {
+				continue
+			}
+
+			vk.DeviceWaitIdle(gpu_context.device)
+			game_module.api.unload(&engine_api, raw_data(game_memory), len(game_memory))
+			unload_game_module(&game_module)
+
+			if !load_game_module_from_bytes(&game_module, staged_game_dll) {
+				delete(staged_game_dll, context.temp_allocator)
+				log_warn("Game reload failed, keeping previous binary unloaded")
+				continue
+			}
+			delete(staged_game_dll, context.temp_allocator)
+
+			if game_module.api.get_memory_size() != len(game_memory) {
+				log_warnf(
+					"Game memory size changed from %d to %d; preserving old block",
+					len(game_memory),
+					game_module.api.get_memory_size(),
+				)
+			}
+
+			game_module.api.reload(&engine_api, raw_data(game_memory), len(game_memory))
+		}
+
+		if game_module.is_loaded {
+			game_module.api.update(&engine_api, raw_data(game_memory), len(game_memory))
+		}
 
 		// Wait for the previous frame to finish
 		wait_result := vk.WaitForFences(
@@ -1218,6 +1462,7 @@ main :: proc() {
 			swapchain_context.extent,
 			graphics_pipeline,
 			pipeline_layout,
+			&frame_commands,
 		) {
 			log_error("Failed to record command buffer")
 			return

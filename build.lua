@@ -20,10 +20,22 @@ end
 
 local is_macos = detect_macos()
 
+local function dynamic_lib_name(base)
+    if is_windows then
+        return base .. ".dll"
+    end
+    if is_macos then
+        return "lib" .. base .. ".dylib"
+    end
+    return "lib" .. base .. ".so"
+end
+
 local function joinpath(...)
     local parts = { ... }
     return table.concat(parts, sep)
 end
+
+local shader_root = joinpath("engine", "shaders")
 
 local function basename(path)
     return path:match("[^/\\]+$") or path
@@ -123,9 +135,9 @@ end
 local function discover_shader_sources(project_root)
     local list_cmd
     if is_windows then
-        list_cmd = "dir /s /b shaders\\*.vert shaders\\*.frag 2>nul"
+        list_cmd = "dir /s /b " .. shell_escape(shader_root .. "\\*.vert") .. " " .. shell_escape(shader_root .. "\\*.frag") .. " 2>nul"
     else
-        list_cmd = "find shaders -type f \\( -name '*.vert' -o -name '*.frag' \\) -print 2>/dev/null"
+        list_cmd = "find " .. shell_escape(shader_root) .. " -type f \\( -name '*.vert' -o -name '*.frag' \\) -print 2>/dev/null"
     end
 
     local proc = popen_in_dir(project_root, list_cmd)
@@ -176,7 +188,7 @@ local function compile_shaders(project_root)
         return false, discover_err
     end
     if #shaders == 0 then
-        return false, "No shaders found under shaders/ (*.vert, *.frag)"
+        return false, "No shaders found under engine/shaders/ (*.vert, *.frag)"
     end
 
     local glslc = find_glslc()
@@ -251,7 +263,8 @@ local function get_build_command(project_root)
         local build_cmd = {
             "odin",
             "build",
-            ".",
+            "engine",
+            "-collection:app=.",
             "-subsystem:" .. (debug_build and "console" or "windows"),
             "-out:" .. output_rel_path,
             "-extra-linker-flags:/LIBPATH:" .. quote_if_needed(vulkan_lib_path),
@@ -265,7 +278,7 @@ local function get_build_command(project_root)
     end
 
     if is_macos then
-        local build_cmd = { "odin", "build", ".", "-out:" .. output_rel_path }
+        local build_cmd = { "odin", "build", "engine", "-collection:app=.", "-out:" .. output_rel_path }
         if debug_build then
             table.insert(build_cmd, "-debug")
         end
@@ -292,11 +305,29 @@ local function get_build_command(project_root)
         return build_cmd
     end
 
-    local build_cmd = { "odin", "build", ".", "-out:" .. output_rel_path }
+    local build_cmd = { "odin", "build", "engine", "-collection:app=.", "-out:" .. output_rel_path }
     if debug_build then
         table.insert(build_cmd, "-debug")
     end
     return build_cmd
+end
+
+local function get_game_build_command(project_root)
+	local output_rel_path = joinpath("bin", dynamic_lib_name("game"))
+    local cmd = {
+        "odin",
+        "build",
+        "game",
+        "-build-mode:dll",
+        "-collection:app=.",
+        "-out:" .. output_rel_path,
+    }
+
+    if is_debug_build() then
+        table.insert(cmd, "-debug")
+    end
+
+    return cmd
 end
 
 local function script_dir()
@@ -336,15 +367,25 @@ local function run_build(project_root)
 
     local command = command_to_string(build_cmd)
     local success, err = execute_in_dir(project_root, command)
-    if success then
-        return true
+    if not success then
+        return false, "Build failed (" .. err .. ")"
     end
 
-    return false, "Build failed (" .. err .. ")"
+    local game_cmd = command_to_string(get_game_build_command())
+    local game_success, game_err = execute_in_dir(project_root, game_cmd)
+    if not game_success then
+        return false, "Game DLL build failed (" .. game_err .. ")"
+    end
+
+    return true
 end
 
 function M.get_build_command(project_root)
     return get_build_command(project_root)
+end
+
+function M.get_game_build_command(project_root)
+    return get_game_build_command(project_root)
 end
 
 function M.command_to_string(cmd)

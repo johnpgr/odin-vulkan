@@ -198,14 +198,35 @@ local function build_with_compile_mode()
         return
     end
 
-    vim.fn.mkdir(joinpath(project_root, "bin"), "p")
-    local build_cmd, build_error = build.get_build_command(project_root)
-    if not build_cmd then
-        vim.notify(build_error, vim.log.levels.ERROR)
+    if type(build.get_build_command) ~= "function" then
+        vim.notify("build.lua must expose get_build_command()", vim.log.levels.ERROR)
         return
     end
 
-    vim.cmd("Compile " .. command_to_string(build_cmd))
+    if type(build.get_game_build_command) ~= "function" then
+        vim.notify("build.lua must expose get_game_build_command()", vim.log.levels.ERROR)
+        return
+    end
+
+    vim.fn.mkdir(joinpath(project_root, "bin"), "p")
+
+    local app_build_cmd, app_build_error = build.get_build_command(project_root)
+    if not app_build_cmd then
+        vim.notify(app_build_error, vim.log.levels.ERROR)
+        return
+    end
+
+    local game_build_cmd, game_build_error = build.get_game_build_command(project_root)
+    if not game_build_cmd then
+        vim.notify(game_build_error, vim.log.levels.ERROR)
+        return
+    end
+
+    vim.system(app_build_cmd, { cwd = project_root, text = true }, function(_)
+        vim.schedule(function()
+            vim.cmd("Compile " .. command_to_string(game_build_cmd))
+        end)
+    end)
 end
 
 local function stop_debug_session()
@@ -229,7 +250,7 @@ vim.keymap.set("n", "<leader>dr", build_and_run, {
 })
 
 vim.keymap.set("n", "<leader>cb", build_with_compile_mode, {
-    desc = "Build app (compile-mode)",
+    desc = "Build app + game DLL (compile-mode)",
     silent = true,
 })
 

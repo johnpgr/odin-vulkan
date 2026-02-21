@@ -1,24 +1,6 @@
-package main
+package engine
 
 import "core:mem"
-
-// Two global context allocators, set once via memory_init() in main:
-//
-//   context.allocator, context.temp_allocator = memory_init()
-//
-// App allocator — persistent, lives for the entire program:
-//
-//   make([]T, n)                   // uses context.allocator implicitly
-//
-// Temp allocator — transient, reset at the top of each game loop iteration:
-//
-//   free_all(context.temp_allocator)
-//   make([]T, n, context.temp_allocator)
-//
-// Swapchain allocator — fixed-size arena for swapchain host-side arrays:
-//
-//   swapchain_allocator := swapchain_memory_init()
-//   swapchain_memory_reset(swapchain_allocator)
 
 APP_MEMORY_SIZE :: #config(ODINGAME_APP_MEMORY_SIZE, 64 * mem.Megabyte)
 FRAME_MEMORY_SIZE :: #config(ODINGAME_FRAME_MEMORY_SIZE, 16 * mem.Megabyte)

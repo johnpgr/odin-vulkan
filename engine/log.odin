@@ -1,4 +1,4 @@
-package main
+package engine
 
 import "base:runtime"
 import "core:fmt"
@@ -72,34 +72,12 @@ logf :: proc(level: Log_Level, fmt_str: string, args: ..any) {
 	log_emit(level, text)
 }
 
-log_debug :: proc(args: ..any, sep := " ") {
-	logln(.Debug, ..args, sep = sep)
-}
+log_debug :: proc(args: ..any, sep := " ") { logln(.Debug, ..args, sep = sep) }
+log_info :: proc(args: ..any, sep := " ") { logln(.Info, ..args, sep = sep) }
+log_warn :: proc(args: ..any, sep := " ") { logln(.Warn, ..args, sep = sep) }
+log_error :: proc(args: ..any, sep := " ") { logln(.Error, ..args, sep = sep) }
 
-log_info :: proc(args: ..any, sep := " ") {
-	logln(.Info, ..args, sep = sep)
-}
-
-log_warn :: proc(args: ..any, sep := " ") {
-	logln(.Warn, ..args, sep = sep)
-}
-
-log_error :: proc(args: ..any, sep := " ") {
-	logln(.Error, ..args, sep = sep)
-}
-
-log_debugf :: proc(fmt_str: string, args: ..any) {
-	logf(.Debug, fmt_str, ..args)
-}
-
-log_infof :: proc(fmt_str: string, args: ..any) {
-	logf(.Info, fmt_str, ..args)
-}
-
-log_warnf :: proc(fmt_str: string, args: ..any) {
-	logf(.Warn, fmt_str, ..args)
-}
-
-log_errorf :: proc(fmt_str: string, args: ..any) {
-	logf(.Error, fmt_str, ..args)
-}
+log_debugf :: proc(fmt_str: string, args: ..any) { logf(.Debug, fmt_str, ..args) }
+log_infof :: proc(fmt_str: string, args: ..any) { logf(.Info, fmt_str, ..args) }
+log_warnf :: proc(fmt_str: string, args: ..any) { logf(.Warn, fmt_str, ..args) }
+log_errorf :: proc(fmt_str: string, args: ..any) { logf(.Error, fmt_str, ..args) }
