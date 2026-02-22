@@ -186,11 +186,17 @@ local function build_with_compile_mode()
         return
     end
 
-    vim.system(app_build_cmd, { cwd = project_root, text = true }, function(_)
-        vim.schedule(function()
-            vim.cmd("Compile " .. command_to_string(game_build_cmd))
-        end)
-    end)
+	vim.system(app_build_cmd, { cwd = project_root, text = true }, function(res)
+		vim.schedule(function()
+			if res.code ~= 0 then
+				local output = (res.stderr and res.stderr ~= "") and res.stderr or (res.stdout or "")
+				vim.notify("App build failed:\n" .. output, vim.log.levels.ERROR)
+				return
+			end
+
+			vim.cmd("Compile " .. command_to_string(game_build_cmd))
+		end)
+	end)
 end
 
 local function build_game_dll_only_with_compile_mode()

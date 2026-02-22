@@ -1,7 +1,31 @@
 local M = {}
 
-local sep = package.config:sub(1, 1)
-local is_windows = sep == "\\"
+local function detect_windows()
+    if package.config:sub(1, 1) == "\\" then
+        return true
+    end
+
+    local os_name = os.getenv("OS")
+    if type(os_name) == "string" and os_name:lower():find("windows", 1, true) then
+        return true
+    end
+
+    local proc = io.popen("uname -s 2>/dev/null")
+    if not proc then
+        return false
+    end
+
+    local name = (proc:read("*l") or ""):upper()
+    proc:close()
+
+    return name:find("MINGW", 1, true) ~= nil
+        or name:find("MSYS", 1, true) ~= nil
+        or name:find("CYGWIN", 1, true) ~= nil
+        or name:find("WINDOWS", 1, true) ~= nil
+end
+
+local is_windows = detect_windows()
+local sep = is_windows and "\\" or "/"
 
 local function detect_macos()
     if is_windows then
@@ -19,6 +43,24 @@ local function detect_macos()
 end
 
 local is_macos = detect_macos()
+
+local function env_is_truthy(value)
+    if type(value) ~= "string" then
+        return false
+    end
+
+    local lowered = value:lower()
+    return lowered == "1" or lowered == "true" or lowered == "yes" or lowered == "on"
+end
+
+local verbose = env_is_truthy(os.getenv("ODINGAME_BUILD_VERBOSE"))
+
+local function log_debug(message)
+    if not verbose then
+        return
+    end
+    io.stderr:write("[build] " .. tostring(message) .. "\n")
+end
 
 local function dynamic_lib_name(base)
     if is_windows then
@@ -39,6 +81,40 @@ local shader_root = joinpath("engine", "shaders")
 
 local function basename(path)
     return path:match("[^/\\]+$") or path
+end
+
+local function current_working_directory()
+    local cmd = is_windows and "cd" or "pwd"
+    local proc = io.popen(cmd)
+    if not proc then
+        return nil
+    end
+
+    local dir = (proc:read("*l") or ""):gsub("\r$", "")
+    proc:close()
+    if dir == "" then
+        return nil
+    end
+
+    return dir
+end
+
+local function resolve_project_name(project_root)
+    local root = project_root:gsub("[/\\]+$", "")
+    local name = basename(root)
+    if name ~= "" and name ~= "." then
+        return name
+    end
+
+    local cwd = current_working_directory()
+    if cwd then
+        local cwd_name = basename(cwd:gsub("[/\\]+$", ""))
+        if cwd_name ~= "" and cwd_name ~= "." then
+            return cwd_name
+        end
+    end
+
+    return "odingame"
 end
 
 local function file_exists(path)
@@ -88,10 +164,20 @@ local function execute_in_dir(project_root, command)
         run_cmd = "cd " .. shell_escape(project_root) .. " && " .. command
     end
 
+    log_debug("exec: " .. run_cmd)
+
     local success, reason, code = os.execute(run_cmd)
     if success == true or success == 0 then
+        log_debug("exec ok")
         return true
     end
+
+    if type(success) == "number" then
+        log_debug("exec failed with numeric status: " .. tostring(success))
+        return false, "exit code " .. success
+    end
+
+    log_debug("exec failed: success=" .. tostring(success) .. ", reason=" .. tostring(reason) .. ", code=" .. tostring(code))
 
     if type(code) == "number" then
         return false, "exit code " .. code
@@ -110,6 +196,7 @@ local function popen_in_dir(project_root, command)
     else
         run_cmd = "cd " .. shell_escape(project_root) .. " && " .. command
     end
+    log_debug("popen: " .. run_cmd)
     return io.popen(run_cmd)
 end
 
@@ -133,28 +220,45 @@ local function make_relative_path(project_root, path)
 end
 
 local function discover_shader_sources(project_root)
-    local list_cmd
+    log_debug("discover shaders: project_root=" .. tostring(project_root) .. ", shader_root=" .. tostring(shader_root))
+
+    local list_cmds
     if is_windows then
-        list_cmd = "dir /s /b " .. shell_escape(shader_root .. "\\*.vert") .. " " .. shell_escape(shader_root .. "\\*.frag") .. " 2>nul"
+        list_cmds = {
+            "dir /s /b " .. shell_escape(shader_root .. "\\*.vert") .. " 2>nul",
+            "dir /s /b " .. shell_escape(shader_root .. "\\*.frag") .. " 2>nul",
+        }
     else
-        list_cmd = "find " .. shell_escape(shader_root) .. " -type f \\( -name '*.vert' -o -name '*.frag' \\) -print 2>/dev/null"
+        list_cmds = {
+            "find " .. shell_escape(shader_root) .. " -type f \\( -name '*.vert' -o -name '*.frag' \\) -print 2>/dev/null",
+        }
     end
 
-    local proc = popen_in_dir(project_root, list_cmd)
-    if not proc then
-        return nil, "Could not enumerate shader sources"
+    local dedup = {}
+    for _, list_cmd in ipairs(list_cmds) do
+        log_debug("shader list cmd: " .. list_cmd)
+        local proc = popen_in_dir(project_root, list_cmd)
+        if not proc then
+            return nil, "Could not enumerate shader sources"
+        end
+
+        for raw_line in proc:lines() do
+            local line = raw_line:gsub("\r$", "")
+            if line ~= "" and line ~= "File Not Found" then
+                log_debug("shader list output: " .. line)
+                dedup[make_relative_path(project_root, line)] = true
+            end
+        end
+        proc:close()
     end
 
     local sources = {}
-    for raw_line in proc:lines() do
-        local line = raw_line:gsub("\r$", "")
-        if line ~= "" and line ~= "File Not Found" then
-            sources[#sources + 1] = make_relative_path(project_root, line)
-        end
+    for path in pairs(dedup) do
+        sources[#sources + 1] = path
     end
-    proc:close()
 
     table.sort(sources)
+    log_debug("shader source count: " .. tostring(#sources))
     return sources
 end
 
@@ -188,11 +292,13 @@ local function compile_shaders(project_root)
         return false, discover_err
     end
     if #shaders == 0 then
-        return false, "No shaders found under engine/shaders/ (*.vert, *.frag)"
+        return false, "No shaders found under engine/shaders/ (*.vert, *.frag). Re-run with --verbose or set ODINGAME_BUILD_VERBOSE=1"
     end
 
     local glslc = find_glslc()
+    log_debug("using glslc: " .. glslc)
     for _, shader_src in ipairs(shaders) do
+        log_debug("compiling shader: " .. shader_src)
         local cmd = command_to_string({ glslc, shader_src, "-o", shader_src .. ".spv" })
         local ok, err = execute_in_dir(project_root, cmd)
         if not ok then
@@ -243,8 +349,7 @@ local function find_vulkan_dylib_dir(candidates)
 end
 
 local function get_build_command(project_root)
-    local root = project_root:gsub("[/\\]+$", "")
-    local project_name = basename(root)
+    local project_name = resolve_project_name(project_root)
     local output_name = project_name .. (is_windows and ".exe" or "")
     local output_rel_path = joinpath("bin", output_name)
     local debug_build = is_debug_build()
@@ -371,7 +476,7 @@ local function run_build(project_root)
         return false, "Build failed (" .. err .. ")"
     end
 
-    local game_cmd = command_to_string(get_game_build_command())
+    local game_cmd = command_to_string(get_game_build_command(project_root))
     local game_success, game_err = execute_in_dir(project_root, game_cmd)
     if not game_success then
         return false, "Game DLL build failed (" .. game_err .. ")"
@@ -396,10 +501,38 @@ function M.run(project_root)
     return run_build(project_root)
 end
 
+local function parse_cli_args(args)
+    local root
+    local print_only = false
+    local cli_verbose = false
+
+    for i = 1, #args do
+        local value = args[i]
+        if value == "--print-cmd" then
+            print_only = true
+        elseif value == "--verbose" then
+            cli_verbose = true
+        elseif value ~= "" and value:sub(1, 2) == "--" then
+            -- ignore unknown flags
+        elseif not root then
+            root = value
+        end
+    end
+
+    return root, print_only, cli_verbose
+end
+
 function M.main(argv)
     local args = argv or arg or {}
-    local root = (args[1] and args[1] ~= "--print-cmd") and args[1] or script_dir()
-    local print_only = (args[1] == "--print-cmd") or (args[2] == "--print-cmd")
+    local root_arg, print_only, cli_verbose = parse_cli_args(args)
+    local root = root_arg or script_dir()
+
+    if cli_verbose then
+        verbose = true
+    end
+
+    log_debug("platform: is_windows=" .. tostring(is_windows) .. ", is_macos=" .. tostring(is_macos) .. ", sep=" .. sep)
+    log_debug("root: " .. tostring(root))
 
     if print_only then
         local build_cmd, build_error = get_build_command(root)
