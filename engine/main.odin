@@ -709,6 +709,21 @@ recreate_swapchain :: proc(
 	return true
 }
 
+wait_for_non_zero_framebuffer :: proc(window: glfw.WindowHandle) -> bool {
+	for {
+		width, height := glfw.GetFramebufferSize(window)
+		if width > 0 && height > 0 {
+			return true
+		}
+
+		if glfw.WindowShouldClose(window) {
+			return false
+		}
+
+		glfw.WaitEvents()
+	}
+}
+
 record_command_buffer :: proc(
 	cmd: vk.CommandBuffer,
 	swapchain_image: vk.Image,
@@ -1018,6 +1033,7 @@ create_graphics_pipeline :: proc(
 }
 
 recreate_swapchain_and_pipeline :: proc(
+	window: glfw.WindowHandle,
 	device: vk.Device,
 	physical_device: vk.PhysicalDevice,
 	surface: vk.SurfaceKHR,
@@ -1029,6 +1045,10 @@ recreate_swapchain_and_pipeline :: proc(
 	graphics_pipeline: ^vk.Pipeline,
 	render_finished_semaphores: ^[]vk.Semaphore,
 ) -> bool {
+	if !wait_for_non_zero_framebuffer(window) {
+		return false
+	}
+
 	if !recreate_swapchain(
 		device,
 		physical_device,
@@ -1426,6 +1446,7 @@ main :: proc() {
 		// proceed
 		case .SUBOPTIMAL_KHR, .ERROR_OUT_OF_DATE_KHR:
 			if !recreate_swapchain_and_pipeline(
+				window,
 				gpu_context.device,
 				physical_device,
 				surface,
@@ -1437,6 +1458,9 @@ main :: proc() {
 				&graphics_pipeline,
 				&render_finished_semaphores,
 			) {
+				if glfw.WindowShouldClose(window) {
+					continue
+				}
 				log_error("Failed to recreate swapchain/pipeline after acquire")
 				return
 			}
@@ -1510,6 +1534,7 @@ main :: proc() {
 		// proceed
 		case .SUBOPTIMAL_KHR, .ERROR_OUT_OF_DATE_KHR:
 			if !recreate_swapchain_and_pipeline(
+				window,
 				gpu_context.device,
 				physical_device,
 				surface,
@@ -1521,6 +1546,9 @@ main :: proc() {
 				&graphics_pipeline,
 				&render_finished_semaphores,
 			) {
+				if glfw.WindowShouldClose(window) {
+					continue
+				}
 				log_error("Failed to recreate swapchain/pipeline after present")
 				return
 			}
