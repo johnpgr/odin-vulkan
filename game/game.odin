@@ -7,6 +7,8 @@ Game_State :: struct {
 	time:         f32,
 	reload_count: u32,
 	clear_hue:    f32,
+
+	world: World,
 }
 
 @(private) nil_game_state: Game_State
