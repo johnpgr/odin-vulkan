@@ -445,12 +445,12 @@ surface_format_supports_usage :: proc(
 // -----------------------------------------------------------------------
 
 Quad_Command :: struct {
-	rect:  [4]f32,
-	color: [4]f32,
+	rect:  vec4,
+	color: vec4,
 }
 
 Frame_Commands :: struct {
-	clear_color: [4]f32,
+	clear_color: vec4,
 	quads:       [dynamic]Quad_Command,
 }
 
@@ -821,7 +821,7 @@ record_command_buffer :: proc(
 	pipeline: vk.Pipeline,
 	layout: vk.PipelineLayout,
 	descriptor_set: vk.DescriptorSet,
-	clear_color: [4]f32,
+	clear_color: vec4,
 	quad_count: int,
 ) -> bool {
 	cmd_begin_info := vk.CommandBufferBeginInfo {

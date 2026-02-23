@@ -1,5 +1,15 @@
 package game
 
+import shared "../shared"
+
+vec2 :: shared.vec2
+vec3 :: shared.vec3
+vec4 :: shared.vec4
+mat2 :: shared.mat2
+mat3 :: shared.mat3
+mat4 :: shared.mat4
+quat :: shared.quat
+
 MAX_ENTITIES :: 1024
 
 Handle :: struct {
@@ -51,10 +61,10 @@ Entity :: struct {
 	flags:    Entity_Flags,
 
 	// Transform
-	position: [3]f32,
-	rotation: [3]f32,
-	scale:    [3]f32,
-	velocity: [3]f32,
+	position: vec3,
+	rotation: vec3,
+	scale:    vec3,
+	velocity: vec3,
 
 	// Intrusive hierarchy (index 0 = no relation)
 	parent_idx:       u32,
