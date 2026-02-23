@@ -9,9 +9,11 @@ Game_State :: struct {
 	clear_hue:    f32,
 }
 
+@(private) nil_game_state: Game_State
+
 get_state :: proc(memory: rawptr, memory_size: int) -> ^Game_State {
 	if memory == nil || memory_size < size_of(Game_State) {
-		return nil
+		return &nil_game_state
 	}
 	return cast(^Game_State)memory
 }
@@ -29,9 +31,6 @@ game_get_memory_size :: proc() -> int {
 @(export)
 game_load :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
 	state := get_state(memory, memory_size)
-	if state == nil {
-		return
-	}
 
 	state^ = {}
 	api.log("game_load")
@@ -40,27 +39,20 @@ game_load :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
 @(export)
 game_unload :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
 	state := get_state(memory, memory_size)
-	if state != nil {
-		state.time = 0
-	}
+	state.time = 0
 	api.log("game_unload")
 }
 
 @(export)
 game_reload :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
 	state := get_state(memory, memory_size)
-	if state != nil {
-		state.reload_count += 1
-	}
+	state.reload_count += 1
 	api.log("game_reload")
 }
 
 @(export)
 game_update :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
 	state := get_state(memory, memory_size)
-	if state == nil {
-		return
-	}
 
 	dt := api.get_dt()
 	state.time += dt
