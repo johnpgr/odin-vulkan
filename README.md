@@ -6,14 +6,13 @@ The build script is `build.lua` (Lua 5.x). Run it from the project root:
 lua build.lua
 ```
 
-This does three things in order:
-1. Compiles all `engine/shaders/*.vert` and `*.frag` to `.spv` via `glslc`
-2. Builds `engine/` → `bin/odingame.exe`
-3. Builds `game/` → `bin/game.dll`
+This builds two targets in order:
+1. Builds `engine/` → `bin/odingame.exe`
+2. Builds `game/` → `bin/game.dll`
 
-**Prerequisites:** Odin compiler on PATH, `VULKAN_SDK` env var set (Windows/macOS), `glslc` on PATH or inside `$VULKAN_SDK/Bin/`.
+**Prerequisites:** Odin compiler on PATH, `VULKAN_SDK` env var set (Windows/macOS).
 
-**Debug vs release:** Debug is the default. Set `ODINGAME_BUILD_MODE=release` for an optimized/non-console build.
+**Debug vs release:** Debug is default (`lua build.lua`). Use `lua build.lua release` for optimized/non-console build.
 
 **Run:**
 ```sh
@@ -23,12 +22,16 @@ bin/odingame.exe        # Windows
 
 **Build just the game DLL** (hot-reload workflow — engine stays running):
 ```sh
-odin build game -build-mode:dll -out:bin/game.dll
+lua build.lua game
+# release game-only build:
+lua build.lua game release
 ```
 
 The engine detects the new DLL automatically via mtime polling and reloads it within the current frame.
 
-**Add a new shader:** drop a `.vert` or `.frag` file into `engine/shaders/`. `build.lua` discovers them automatically via directory scan. Load it at runtime with `load_shader(device, "myshader.vert")`.
+**Build shaders:** run `lua build_shaders.lua` to compile all `engine/shaders/*.vert` and `*.frag` to `.spv`.
+
+**Add a new shader:** drop a `.vert` or `.frag` file into `engine/shaders/`, then run `lua build_shaders.lua`. Load it at runtime with `load_shader(device, "myshader.vert")`.
 
 There are no tests or linting tools.
 
