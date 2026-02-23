@@ -9,11 +9,12 @@ You are an expert in handmade-style game engine memory management. When helping 
 
 ## Core Philosophy
 
-**All memory is allocated upfront. Individual per-object malloc/free is forbidden.**
+**Bulk allocation with tuned sizes. Individual per-object malloc/free is forbidden.**
 
 Dynamic runtime allocations (malloc, new, per-entity allocations) create unpredictable performance, fragment memory, and introduce failure points. Instead:
 
 - Define **harsh limits** at compile time (e.g., `MAX_ENTITIES :: 10_000`)
+- Profile peak usage and set arena initial sizes to comfortably cover that peak
 - If the game loads successfully once, it will reliably run on that hardware forever — no late-game OOM crashes
 - Memory fragmentation is impossible because there is no fragmentation to create
 
@@ -21,10 +22,19 @@ Dynamic runtime allocations (malloc, new, per-entity allocations) create unpredi
 
 For dynamic-sized data (rendering commands, level loading, temporary work), use a bump/arena allocator:
 
-1. Allocate one large block at startup
+1. Allocate a profiled/tuned initial block at startup
 2. Advance a pointer forward through it sequentially
 3. When the scope ends (frame ends, level ends), reset the offset to zero
 4. No per-object free, no garbage collection, no reference counting
+
+### Growable Arenas
+
+Arenas are **tuned-size with a growth fallback**, not rigidly fixed:
+
+- **Profile first:** run the game, measure peak usage per arena, set initial size to cover that peak
+- **Growth is a bug signal:** if an arena grows at runtime, that means your tuned size is wrong — fix the size, don't rely on growth as normal operation
+- **Growth mechanism:** when the arena exhausts its block, allocate a new chained block (same default size or larger if the single allocation demands it). On arena clear, reset all blocks' offsets to zero
+- **Graceful OOM via ZII stub:** if the OS refuses memory, return a pointer to a global zero-initialized stub instead of NULL. Because all structs use Zero Is Initialization, the code safely reads/writes the stub without crashing — the game may glitch visually for a frame but keeps running. No null checks polluting the codebase
 
 ### Arena Lifetimes
 
@@ -45,7 +55,9 @@ Odin has built-in arena support in `core:mem`:
 - Arenas can be created with `mem.Arena` and initialized with a backing buffer
 - Use `mem.arena_allocator(&arena)` to get an `Allocator` from an arena
 - Reset with `mem.arena_free_all(&arena)` or `free_all(temp_allocator)` at frame start
-- Size arenas via `#config` at compile time for static sizing
+- Size arenas via `#config` at compile time for initial sizing
+
+For growable arenas in Odin, prefer `virtual.Arena` (`core:mem/virtual`) — it reserves a large virtual address range upfront and commits physical pages on demand. The OS only backs pages you actually touch, so you get growability without chained blocks or wasted physical memory.
 
 ## Vulkan Memory
 
