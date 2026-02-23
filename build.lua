@@ -124,6 +124,47 @@ local function file_exists(path)
     return true
 end
 
+local function odin_root()
+    local proc = io.popen("odin root 2>/dev/null")
+    if not proc then
+        return nil
+    end
+
+    local value = proc:read("*l")
+    proc:close()
+
+    if type(value) ~= "string" or value == "" then
+        return nil
+    end
+
+    return value
+end
+
+local function ensure_cgltf_library()
+    if host_os == "windows" then
+        return true
+    end
+
+    local root = odin_root()
+    if not root then
+        return false, "Could not resolve Odin root (needed for cgltf)"
+    end
+
+    local lib_path
+    if host_os == "macos" then
+        lib_path = joinpath(root, "vendor", "cgltf", "lib", "darwin", "cgltf.a")
+    else
+        lib_path = joinpath(root, "vendor", "cgltf", "lib", "cgltf.a")
+    end
+
+    if file_exists(lib_path) then
+        return true
+    end
+
+    local build_hint = "make -C \"" .. joinpath(root, "vendor", "cgltf", "src") .. "\""
+    return false, "Missing cgltf static library (" .. lib_path .. "). Run: " .. build_hint
+end
+
 local function find_vulkan_lib_dir(vulkan_sdk)
     local candidates = {
         joinpath(vulkan_sdk, "Lib"),
@@ -327,6 +368,12 @@ local function main()
 
     local ok, err
     if build_target ~= "game" then
+        ok, err = ensure_cgltf_library()
+        if not ok then
+            io.stderr:write(tostring(err) .. "\n")
+            return false
+        end
+
         log_verbose("building engine")
         ok, err = build_engine(root)
         if not ok then

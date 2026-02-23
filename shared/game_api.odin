@@ -1,10 +1,15 @@
 package shared
 
-GAME_API_VERSION :: u32(2)
+GAME_API_VERSION :: u32(3)
+
+Mesh_Handle :: distinct u32
+CUBE_MESH :: Mesh_Handle(0)
 
 Engine_Draw_Quad_Proc :: proc(x, y, width, height: f32, r, g, b, a: f32)
 Engine_Set_Clear_Color_Proc :: proc(r, g, b, a: f32)
 Engine_Set_Camera_Proc :: proc(eye_x, eye_y, eye_z, tx, ty, tz: f32)
+Engine_Load_Mesh_Proc :: proc(path: cstring) -> Mesh_Handle
+Engine_Draw_Mesh_Proc :: proc(handle: Mesh_Handle, model: mat4, r, g, b, a: f32)
 Engine_Draw_Cube_Proc :: proc(model: mat4, r, g, b, a: f32)
 Engine_Log_Proc :: proc(message: string)
 Engine_Get_DT_Proc :: proc() -> f32
@@ -16,6 +21,8 @@ Engine_API :: struct {
 	draw_quad:       Engine_Draw_Quad_Proc,
 	set_clear_color: Engine_Set_Clear_Color_Proc,
 	set_camera:      Engine_Set_Camera_Proc,
+	load_mesh:       Engine_Load_Mesh_Proc,
+	draw_mesh:       Engine_Draw_Mesh_Proc,
 	draw_cube:       Engine_Draw_Cube_Proc,
 	log:             Engine_Log_Proc,
 	get_dt:          Engine_Get_DT_Proc,
