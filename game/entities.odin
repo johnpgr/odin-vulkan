@@ -88,11 +88,11 @@ World :: struct {
 	slots:      [MAX_ENTITIES]Entity_Slot,
 	free_list:  [MAX_ENTITIES]u32,
 	free_count: u32,
-	next_slot:  u32, // next never-used index; starts at 1 (0 = nil sentinel)
+	next_slot:  u32, // next never-used index; starts at 1 (0 is invalid handle index)
 	count:      u32,
 }
 
-world_spawn :: proc(world: ^World) -> (entity: ^Entity, handle: Handle) {
+world_spawn :: proc(world: ^World) -> (entity: ^Entity, handle: Handle, ok: bool) {
 	if world.next_slot == 0 {
 		world.next_slot = 1
 	}
@@ -103,7 +103,7 @@ world_spawn :: proc(world: ^World) -> (entity: ^Entity, handle: Handle) {
 		idx = world.free_list[world.free_count]
 	} else {
 		if world.next_slot >= MAX_ENTITIES {
-			return &world.slots[0].entity, {}
+			return nil, {}, false
 		}
 		idx = world.next_slot
 		world.next_slot += 1
@@ -114,7 +114,7 @@ world_spawn :: proc(world: ^World) -> (entity: ^Entity, handle: Handle) {
 	slot.is_occupied = true
 	world.count += 1
 
-	return &slot.entity, Handle{index = idx, generation = slot.generation}
+	return &slot.entity, Handle{index = idx, generation = slot.generation}, true
 }
 
 world_despawn :: proc(world: ^World, handle: Handle) {
@@ -135,13 +135,13 @@ world_despawn :: proc(world: ^World, handle: Handle) {
 	}
 }
 
-world_resolve :: proc(world: ^World, handle: Handle) -> ^Entity {
+world_resolve :: proc(world: ^World, handle: Handle) -> (^Entity, bool) {
 	if handle.index == 0 || handle.index >= MAX_ENTITIES {
-		return &world.slots[0].entity
+		return nil, false
 	}
 	slot := &world.slots[handle.index]
 	if !slot.is_occupied || slot.generation != handle.generation {
-		return &world.slots[0].entity
+		return nil, false
 	}
-	return &slot.entity
+	return &slot.entity, true
 }

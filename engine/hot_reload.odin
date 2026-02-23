@@ -101,7 +101,12 @@ load_game_module_from_bytes :: proc(module: ^Game_Module, bytes: []byte) -> bool
 		return false
 	}
 
-	module.last_write_time, _ = os.last_write_time_by_name(module.dll_source_path)
+	t, err := os.last_write_time_by_name(module.dll_source_path)
+	if err == nil {
+		module.last_write_time = t
+	} else {
+		log_warnf("Could not read write time for %s: %v", module.dll_source_path, err)
+	}
 	module.is_loaded = true
 	return true
 }

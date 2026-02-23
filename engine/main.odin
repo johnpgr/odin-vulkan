@@ -1,5 +1,6 @@
 package engine
 
+import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:thread"
@@ -266,7 +267,12 @@ create_logical_device :: proc(e: ^Engine) -> bool {
 }
 
 create_swapchain :: proc(e: ^Engine) -> bool {
-	e.swapchain_allocator = swapchain_memory_init()
+	swapchain_alloc, ok_mem := swapchain_memory_init()
+	if !ok_mem {
+		log_error("Failed to init swapchain memory")
+		return false
+	}
+	e.swapchain_allocator = swapchain_alloc
 
 	ctx, ok := create_swapchain_context(
 		e.gpu_context.device,
@@ -481,7 +487,9 @@ init :: proc(e: ^Engine) -> bool {
 // cleanup destroys all Vulkan objects in reverse init order.
 cleanup :: proc(e: ^Engine) {
 	if e.gpu_context.device != nil {
-		vk.DeviceWaitIdle(e.gpu_context.device)
+		if vk.DeviceWaitIdle(e.gpu_context.device) != .SUCCESS {
+			log_error("DeviceWaitIdle failed during cleanup")
+		}
 	}
 
 	delete(e.frame_commands.quads)
@@ -848,7 +856,13 @@ run_main_loop :: proc(e: ^Engine) {
 // -----------------------------------------------------------------------
 
 main :: proc() {
-	context.allocator, context.temp_allocator = memory_init()
+	app_allocator, frame_allocator, ok_mem := memory_init()
+	if !ok_mem {
+		fmt.eprintln("Failed to init memory arenas")
+		os.exit(1)
+	}
+	context.allocator = app_allocator
+	context.temp_allocator = frame_allocator
 
 	e: Engine
 

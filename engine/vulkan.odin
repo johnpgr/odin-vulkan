@@ -171,7 +171,10 @@ find_queue_families :: proc(
 			}
 
 			if !found_present {
-				vk.GetPhysicalDeviceSurfaceSupportKHR(device, u32(i), surface, &found_present)
+				result := vk.GetPhysicalDeviceSurfaceSupportKHR(device, u32(i), surface, &found_present)
+				if result != .SUCCESS {
+					continue
+				}
 				if found_present {
 					families.present_family = u32(i)
 				}
@@ -303,6 +306,10 @@ create_gpu_context :: proc(
 	}
 
 	vk.load_proc_addresses_device(device)
+
+	assert(vk.CmdBeginRendering != nil, "vkCmdBeginRendering not loaded — dynamic rendering extension missing")
+	assert(vk.CmdEndRendering != nil, "vkCmdEndRendering not loaded — dynamic rendering extension missing")
+	assert(vk.CmdPipelineBarrier2 != nil, "vkCmdPipelineBarrier2 not loaded — synchronization2 extension missing")
 
 	graphics_queue, present_queue: vk.Queue
 	vk.GetDeviceQueue(device, queue_families.graphics_family, 0, &graphics_queue)
@@ -783,7 +790,9 @@ recreate_swapchain :: proc(
 	swapchain_allocator: mem.Allocator,
 	swapchain_context: ^SwapchainContext,
 ) -> bool {
-	vk.DeviceWaitIdle(device)
+	if vk.DeviceWaitIdle(device) == .ERROR_DEVICE_LOST {
+		return false
+	}
 	destroy_swapchain_context(device, swapchain_context)
 	swapchain_memory_reset(swapchain_allocator)
 
