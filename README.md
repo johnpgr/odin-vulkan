@@ -14,6 +14,8 @@ This builds two targets in order:
 
 **Debug vs release:** Debug is default (`lua build.lua`). Use `lua build.lua release` for optimized/non-console build.
 
+**Verbose:** add `--verbose` to print build commands and selected paths (for example `lua build.lua game --verbose`).
+
 **Run:**
 ```sh
 bin/odingame.exe        # Windows
@@ -30,6 +32,8 @@ lua build.lua game release
 The engine detects the new DLL automatically via mtime polling and reloads it within the current frame.
 
 **Build shaders:** run `lua build_shaders.lua` to compile all `engine/shaders/*.vert` and `*.frag` to `.spv`.
+
+Add `--verbose` to shader build for scan/compile command logs.
 
 **Add a new shader:** drop a `.vert` or `.frag` file into `engine/shaders/`, then run `lua build_shaders.lua`. Load it at runtime with `load_shader(device, "myshader.vert")`.
 

@@ -1,4 +1,5 @@
 local host_os = "linux"
+local verbose = false
 
 if package.config:sub(1, 1) == "\\" then
     host_os = "windows"
@@ -21,6 +22,27 @@ else
             end
         end
     end
+end
+
+if type(arg) == "table" then
+    for i = 1, #arg do
+        if type(arg[i]) == "string" then
+            local value = arg[i]:lower()
+            if value == "verbose" or value == "--verbose" or value == "-v" then
+                verbose = true
+            else
+                io.stderr:write("Unknown arg: " .. tostring(arg[i]) .. " (use: optional --verbose)\n")
+                os.exit(1)
+            end
+        end
+    end
+end
+
+local function log_verbose(message)
+    if not verbose then
+        return
+    end
+    io.stderr:write("[build_shaders] " .. tostring(message) .. "\n")
 end
 
 local function shell_escape(part)
@@ -61,6 +83,8 @@ local function run_in_root(project_root, command)
     else
         run_cmd = "cd " .. shell_escape(project_root) .. " && " .. command
     end
+
+    log_verbose("exec: " .. run_cmd)
 
     local success, reason, code = os.execute(run_cmd)
     if success == true or success == 0 then
@@ -138,6 +162,7 @@ local function discover_shaders(project_root)
     local shaders = {}
 
     for _, command in ipairs(commands) do
+        log_verbose("scan: " .. command)
         local run_cmd
         if host_os == "windows" then
             run_cmd = "cd /d " .. shell_escape(project_root) .. " && " .. command
@@ -167,6 +192,9 @@ end
 
 local function main()
     local root = script_dir()
+    log_verbose("host_os=" .. host_os)
+    log_verbose("project_root=" .. root)
+
     local shaders, err = discover_shaders(root)
     if not shaders then
         io.stderr:write(err .. "\n")
@@ -177,8 +205,12 @@ local function main()
         return false
     end
 
+    log_verbose("shader_count=" .. tostring(#shaders))
+
     local glslc = find_glslc()
+    log_verbose("glslc=" .. glslc)
     for _, shader in ipairs(shaders) do
+        log_verbose("compile: " .. shader)
         local cmd = command_to_string({ glslc, shader, "-o", shader .. ".spv" })
         local ok, compile_err = run_in_root(root, cmd)
         if not ok then
@@ -191,5 +223,8 @@ local function main()
 end
 
 if not main() then
+    io.stderr:write("[build_shaders] failed\n")
     os.exit(1)
 end
+
+io.stdout:write("[build_shaders] success\n")

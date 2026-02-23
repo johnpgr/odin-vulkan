@@ -1,6 +1,7 @@
 local host_os = "linux"
 local build_mode = "debug"
 local build_target = "all"
+local verbose = false
 
 if package.config:sub(1, 1) == "\\" then
     host_os = "windows"
@@ -33,12 +34,21 @@ if type(arg) == "table" then
                 build_mode = value
             elseif value == "game" or value == "all" then
                 build_target = value
+            elseif value == "verbose" or value == "--verbose" or value == "-v" then
+                verbose = true
             else
-                io.stderr:write("Unknown arg: " .. tostring(arg[i]) .. " (use: debug/release and optional game/all)\n")
+                io.stderr:write("Unknown arg: " .. tostring(arg[i]) .. " (use: debug/release, optional game/all, optional --verbose)\n")
                 os.exit(1)
             end
         end
     end
+end
+
+local function log_verbose(message)
+    if not verbose then
+        return
+    end
+    io.stderr:write("[build] " .. tostring(message) .. "\n")
 end
 
 local function shell_escape(part)
@@ -71,6 +81,8 @@ local function execute_in_root(project_root, command)
     else
         run_cmd = "cd " .. shell_escape(project_root) .. " && " .. command
     end
+
+    log_verbose("exec: " .. run_cmd)
 
     local success, reason, code = os.execute(run_cmd)
     if success == true or success == 0 then
@@ -185,6 +197,7 @@ local function build_engine(project_root)
         if not vulkan_lib then
             return false, "Could not find vulkan-1.lib under VULKAN_SDK"
         end
+        log_verbose("using Vulkan lib dir: " .. vulkan_lib)
 
         cmd[#cmd + 1] = "-subsystem:" .. ((build_mode ~= "release") and "console" or "windows")
         cmd[#cmd + 1] = "-extra-linker-flags:/LIBPATH:" .. vulkan_lib
@@ -193,6 +206,7 @@ local function build_engine(project_root)
         if not vulkan_lib then
             return false, "Could not find libvulkan(.1).dylib"
         end
+        log_verbose("using Vulkan dylib dir: " .. vulkan_lib)
         cmd[#cmd + 1] = "-extra-linker-flags:-L" .. vulkan_lib .. " -Wl,-rpath," .. vulkan_lib
     end
 
@@ -233,6 +247,9 @@ end
 local function main()
     local root = script_dir()
 
+    log_verbose("host_os=" .. host_os .. ", build_mode=" .. build_mode .. ", build_target=" .. build_target)
+    log_verbose("project_root=" .. root)
+
     if not ensure_bin(root) then
         io.stderr:write("Could not create bin directory\n")
         return false
@@ -240,6 +257,7 @@ local function main()
 
     local ok, err
     if build_target ~= "game" then
+        log_verbose("building engine")
         ok, err = build_engine(root)
         if not ok then
             io.stderr:write("Engine build failed (" .. tostring(err) .. ")\n")
@@ -247,6 +265,7 @@ local function main()
         end
     end
 
+    log_verbose("building game")
     ok, err = build_game(root)
     if not ok then
         io.stderr:write("Game DLL build failed (" .. tostring(err) .. ")\n")
@@ -257,5 +276,8 @@ local function main()
 end
 
 if not main() then
+    io.stderr:write("[build] failed\n")
     os.exit(1)
 end
+
+io.stdout:write("[build] success\n")
