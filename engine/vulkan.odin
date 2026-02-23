@@ -20,6 +20,105 @@ foreign vulkan {
 	vkGetInstanceProcAddr :: proc(instance: vk.Instance, pName: cstring) -> vk.ProcVoidFunction ---
 }
 
+MAX_QUADS :: 4096
+
+// -----------------------------------------------------------------------
+// GPU buffer helpers
+// -----------------------------------------------------------------------
+
+Mapped_Buffer :: struct {
+	handle: vk.Buffer,
+	memory: vk.DeviceMemory,
+	mapped: rawptr,
+	size:   vk.DeviceSize,
+}
+
+find_memory_type :: proc(
+	physical_device: vk.PhysicalDevice,
+	type_filter: u32,
+	properties: vk.MemoryPropertyFlags,
+) -> (u32, bool) {
+	mem_props: vk.PhysicalDeviceMemoryProperties
+	vk.GetPhysicalDeviceMemoryProperties(physical_device, &mem_props)
+	for i in 0 ..< mem_props.memoryTypeCount {
+		if (type_filter & (1 << i)) != 0 &&
+		   (mem_props.memoryTypes[i].propertyFlags & properties) == properties {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+create_mapped_buffer :: proc(
+	device: vk.Device,
+	physical_device: vk.PhysicalDevice,
+	size: vk.DeviceSize,
+	usage: vk.BufferUsageFlags,
+) -> (Mapped_Buffer, bool) {
+	buffer_info := vk.BufferCreateInfo {
+		sType       = .BUFFER_CREATE_INFO,
+		size        = size,
+		usage       = usage,
+		sharingMode = .EXCLUSIVE,
+	}
+	buffer: vk.Buffer
+	if vk.CreateBuffer(device, &buffer_info, nil, &buffer) != .SUCCESS {
+		return {}, false
+	}
+
+	mem_reqs: vk.MemoryRequirements
+	vk.GetBufferMemoryRequirements(device, buffer, &mem_reqs)
+
+	mem_type, ok := find_memory_type(
+		physical_device,
+		mem_reqs.memoryTypeBits,
+		{.HOST_VISIBLE, .HOST_COHERENT},
+	)
+	if !ok {
+		vk.DestroyBuffer(device, buffer, nil)
+		return {}, false
+	}
+
+	alloc_info := vk.MemoryAllocateInfo {
+		sType           = .MEMORY_ALLOCATE_INFO,
+		allocationSize  = mem_reqs.size,
+		memoryTypeIndex = mem_type,
+	}
+	memory: vk.DeviceMemory
+	if vk.AllocateMemory(device, &alloc_info, nil, &memory) != .SUCCESS {
+		vk.DestroyBuffer(device, buffer, nil)
+		return {}, false
+	}
+
+	if vk.BindBufferMemory(device, buffer, memory, 0) != .SUCCESS {
+		vk.FreeMemory(device, memory, nil)
+		vk.DestroyBuffer(device, buffer, nil)
+		return {}, false
+	}
+
+	mapped: rawptr
+	if vk.MapMemory(device, memory, 0, size, {}, &mapped) != .SUCCESS {
+		vk.FreeMemory(device, memory, nil)
+		vk.DestroyBuffer(device, buffer, nil)
+		return {}, false
+	}
+
+	return Mapped_Buffer{handle = buffer, memory = memory, mapped = mapped, size = size}, true
+}
+
+destroy_mapped_buffer :: proc(device: vk.Device, buf: ^Mapped_Buffer) {
+	if buf.mapped != nil {
+		vk.UnmapMemory(device, buf.memory)
+	}
+	if buf.handle != 0 {
+		vk.DestroyBuffer(device, buf.handle, nil)
+	}
+	if buf.memory != 0 {
+		vk.FreeMemory(device, buf.memory, nil)
+	}
+	buf^ = {}
+}
+
 // -----------------------------------------------------------------------
 // Queue families
 // -----------------------------------------------------------------------
@@ -354,12 +453,12 @@ surface_format_supports_usage :: proc(
 // -----------------------------------------------------------------------
 
 Quad_Command :: struct {
-	rect:  [4]f32,
-	color: [4]f32,
+	rect:  vec4,
+	color: vec4,
 }
 
 Frame_Commands :: struct {
-	clear_color: [4]f32,
+	clear_color: vec4,
 	quads:       [dynamic]Quad_Command,
 }
 
@@ -608,47 +707,73 @@ destroy_swapchain_context :: proc(device: vk.Device, swapchain_context: ^Swapcha
 }
 
 // -----------------------------------------------------------------------
-// Semaphores & swapchain recreation
+// Bindless descriptor resources
 // -----------------------------------------------------------------------
 
-create_render_finished_semaphores :: proc(
-	device: vk.Device,
-	count: int,
-) -> (
-	[]vk.Semaphore,
-	bool,
-) {
-	semaphore_create_info := vk.SemaphoreCreateInfo {
-		sType = .SEMAPHORE_CREATE_INFO,
+create_descriptor_layout :: proc(device: vk.Device) -> (vk.DescriptorSetLayout, bool) {
+	binding := vk.DescriptorSetLayoutBinding {
+		binding         = 0,
+		descriptorType  = .STORAGE_BUFFER,
+		descriptorCount = 1,
+		stageFlags      = {.VERTEX},
 	}
+	layout_info := vk.DescriptorSetLayoutCreateInfo {
+		sType        = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		bindingCount = 1,
+		pBindings    = &binding,
+	}
+	layout: vk.DescriptorSetLayout
+	if vk.CreateDescriptorSetLayout(device, &layout_info, nil, &layout) != .SUCCESS {
+		return {}, false
+	}
+	return layout, true
+}
 
-	semaphores := make([]vk.Semaphore, count, context.allocator)
-	for i in 0 ..< count {
-		if vk.CreateSemaphore(device, &semaphore_create_info, nil, &semaphores[i]) != .SUCCESS {
-			for destroy_i in 0 ..< i {
-				vk.DestroySemaphore(device, semaphores[destroy_i], nil)
-			}
-			delete(semaphores, context.allocator)
-			return nil, false
+create_quad_descriptor_pool :: proc(device: vk.Device) -> (vk.DescriptorPool, bool) {
+	pool_size := vk.DescriptorPoolSize {
+		type            = .STORAGE_BUFFER,
+		descriptorCount = MAX_FRAMES_IN_FLIGHT,
+	}
+	pool_info := vk.DescriptorPoolCreateInfo {
+		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
+		maxSets       = MAX_FRAMES_IN_FLIGHT,
+		poolSizeCount = 1,
+		pPoolSizes    = &pool_size,
+	}
+	pool: vk.DescriptorPool
+	if vk.CreateDescriptorPool(device, &pool_info, nil, &pool) != .SUCCESS {
+		return {}, false
+	}
+	return pool, true
+}
+
+update_quad_descriptor_sets :: proc(
+	device: vk.Device,
+	descriptor_sets: []vk.DescriptorSet,
+	quad_ssbos: []Mapped_Buffer,
+) {
+	for i in 0 ..< len(descriptor_sets) {
+		buffer_info := vk.DescriptorBufferInfo {
+			buffer = quad_ssbos[i].handle,
+			offset = 0,
+			range  = vk.DeviceSize(MAX_QUADS * size_of(Quad_Command)),
 		}
+		write := vk.WriteDescriptorSet {
+			sType           = .WRITE_DESCRIPTOR_SET,
+			dstSet          = descriptor_sets[i],
+			dstBinding      = 0,
+			dstArrayElement = 0,
+			descriptorType  = .STORAGE_BUFFER,
+			descriptorCount = 1,
+			pBufferInfo     = &buffer_info,
+		}
+		vk.UpdateDescriptorSets(device, 1, &write, 0, nil)
 	}
-
-	return semaphores, true
 }
 
-destroy_render_finished_semaphores :: proc(
-	device: vk.Device,
-	semaphores: ^[]vk.Semaphore,
-) {
-	for semaphore in semaphores^ {
-		vk.DestroySemaphore(device, semaphore, nil)
-	}
-
-	if len(semaphores^) > 0 {
-		delete(semaphores^, context.allocator)
-	}
-	semaphores^ = nil
-}
+// -----------------------------------------------------------------------
+// Semaphores & swapchain recreation
+// -----------------------------------------------------------------------
 
 recreate_swapchain :: proc(
 	device: vk.Device,
@@ -703,7 +828,9 @@ record_command_buffer :: proc(
 	extent: vk.Extent2D,
 	pipeline: vk.Pipeline,
 	layout: vk.PipelineLayout,
-	commands: ^Frame_Commands,
+	descriptor_set: vk.DescriptorSet,
+	clear_color: vec4,
+	quad_count: int,
 ) -> bool {
 	cmd_begin_info := vk.CommandBufferBeginInfo {
 		sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -734,7 +861,7 @@ record_command_buffer :: proc(
 
 	vk.CmdPipelineBarrier2(cmd, &dependency_info)
 
-	clear := commands.clear_color
+	clear := clear_color
 	clear_value := vk.ClearValue {
 		color = vk.ClearColorValue{float32 = {clear[0], clear[1], clear[2], clear[3]}},
 	}
@@ -762,6 +889,8 @@ record_command_buffer :: proc(
 
 	// Bind pipeline and set dynamic state
 	vk.CmdBindPipeline(cmd, .GRAPHICS, pipeline)
+	ds := descriptor_set
+	vk.CmdBindDescriptorSets(cmd, .GRAPHICS, layout, 0, 1, &ds, 0, nil)
 
 	viewports := vk.Viewport{0.0, 0.0, f32(extent.width), f32(extent.height), 0.0, 1.0}
 	vk.CmdSetViewport(cmd, 0, 1, &viewports)
@@ -769,17 +898,8 @@ record_command_buffer :: proc(
 	rect := vk.Rect2D{{0, 0}, extent}
 	vk.CmdSetScissor(cmd, 0, 1, &rect)
 
-	for i in 0 ..< len(commands.quads) {
-		quad := &commands.quads[i]
-		vk.CmdPushConstants(
-			cmd,
-			layout,
-			{.VERTEX, .FRAGMENT},
-			0,
-			u32(size_of(Quad_Command)),
-			quad,
-		)
-		vk.CmdDraw(cmd, 6, 1, 0, 0)
+	if quad_count > 0 {
+		vk.CmdDraw(cmd, 6, u32(quad_count), 0, 0)
 	}
 
 	vk.CmdEndRendering(cmd)
@@ -875,6 +995,7 @@ create_graphics_pipeline :: proc(
 	device: vk.Device,
 	image_format: vk.Format,
 	shader_stages: []vk.PipelineShaderStageCreateInfo,
+	descriptor_layout: vk.DescriptorSetLayout,
 ) -> (
 	vk.PipelineLayout,
 	vk.Pipeline,
@@ -932,16 +1053,11 @@ create_graphics_pipeline :: proc(
 		pAttachments    = &colorblend_attachment,
 	}
 
-	push_constant_range := vk.PushConstantRange {
-		stageFlags = {.VERTEX, .FRAGMENT},
-		offset     = 0,
-		size       = u32(size_of(Quad_Command)),
-	}
-
+	dl := descriptor_layout
 	pipeline_layout_info := vk.PipelineLayoutCreateInfo {
-		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
-		pushConstantRangeCount = 1,
-		pPushConstantRanges    = &push_constant_range,
+		sType          = .PIPELINE_LAYOUT_CREATE_INFO,
+		setLayoutCount = 1,
+		pSetLayouts    = &dl,
 	}
 
 	pipeline_layout: vk.PipelineLayout
@@ -999,7 +1115,7 @@ recreate_swapchain_and_pipeline :: proc(
 	shader_stages: []vk.PipelineShaderStageCreateInfo,
 	pipeline_layout: ^vk.PipelineLayout,
 	graphics_pipeline: ^vk.Pipeline,
-	render_finished_semaphores: ^[]vk.Semaphore,
+	descriptor_layout: vk.DescriptorSetLayout,
 ) -> bool {
 	if !wait_for_non_zero_framebuffer(window) {
 		return false
@@ -1020,6 +1136,7 @@ recreate_swapchain_and_pipeline :: proc(
 		device,
 		swapchain_context.image_format,
 		shader_stages,
+		descriptor_layout,
 	)
 	if !ok_pipeline {
 		return false
@@ -1030,15 +1147,6 @@ recreate_swapchain_and_pipeline :: proc(
 
 	graphics_pipeline^ = new_graphics_pipeline
 	pipeline_layout^ = new_pipeline_layout
-
-	destroy_render_finished_semaphores(device, render_finished_semaphores)
-
-	new_render_finished_semaphores, ok_render_finished_semaphores :=
-		create_render_finished_semaphores(device, len(swapchain_context.images))
-	if !ok_render_finished_semaphores {
-		return false
-	}
-	render_finished_semaphores^ = new_render_finished_semaphores
 
 	return true
 }
