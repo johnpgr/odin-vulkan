@@ -751,6 +751,7 @@ run_main_loop :: proc(e: ^Engine) {
 
 			// Acquire the next swapchain image
 			image_index: u32
+			acquire_suboptimal := false
 			acquire_result := vk.AcquireNextImageKHR(
 				e.gpu_context.device,
 				e.swapchain_context.handle,
@@ -761,7 +762,9 @@ run_main_loop :: proc(e: ^Engine) {
 			)
 			#partial switch acquire_result {
 			case .SUCCESS:
-			case .SUBOPTIMAL_KHR, .ERROR_OUT_OF_DATE_KHR:
+			case .SUBOPTIMAL_KHR:
+				acquire_suboptimal = true
+			case .ERROR_OUT_OF_DATE_KHR:
 				if !recreate_swapchain_and_pipeline(
 					e.window,
 					e.gpu_context.device,
@@ -869,6 +872,29 @@ run_main_loop :: proc(e: ^Engine) {
 			present_result := vk.QueuePresentKHR(e.gpu_context.present_queue, &present_info)
 			#partial switch present_result {
 			case .SUCCESS:
+				if acquire_suboptimal {
+					if !recreate_swapchain_and_pipeline(
+						e.window,
+						e.gpu_context.device,
+						e.physical_device,
+						e.surface,
+						e.queue_family_indices,
+						e.swapchain_allocator,
+						&e.swapchain_context,
+						e.shader_stages[:],
+						&e.pipeline_layout,
+						&e.graphics_pipeline,
+						e.descriptor_layout,
+					) {
+						if !glfw.WindowShouldClose(e.window) {
+							log_error("Failed to recreate swapchain/pipeline after suboptimal acquire")
+							e.quit = true
+						}
+					} else if !create_render_finished_semaphores(e) {
+						log_error("Failed to recreate render_finished semaphores")
+						e.quit = true
+					}
+				}
 			case .SUBOPTIMAL_KHR, .ERROR_OUT_OF_DATE_KHR:
 				if !recreate_swapchain_and_pipeline(
 					e.window,

@@ -22,6 +22,19 @@ foreign vulkan {
 
 MAX_QUADS :: 4096
 
+Cmd_Pipeline_Barrier2_Proc :: #type type_of(vk.CmdPipelineBarrier2)
+Cmd_Begin_Rendering_Proc :: #type type_of(vk.CmdBeginRendering)
+Cmd_End_Rendering_Proc :: #type type_of(vk.CmdEndRendering)
+
+@(private)
+vkCmdPipelineBarrier2: Cmd_Pipeline_Barrier2_Proc
+
+@(private)
+vkCmdBeginRendering: Cmd_Begin_Rendering_Proc
+
+@(private)
+vkCmdEndRendering: Cmd_End_Rendering_Proc
+
 // -----------------------------------------------------------------------
 // GPU buffer helpers
 // -----------------------------------------------------------------------
@@ -359,14 +372,28 @@ create_gpu_context :: proc(
 
 	vk.load_proc_addresses_device(device)
 
-	has_begin_rendering := vk.CmdBeginRendering != nil || vk.CmdBeginRenderingKHR != nil
-	has_end_rendering := vk.CmdEndRendering != nil || vk.CmdEndRenderingKHR != nil
-	has_pipeline_barrier2 := vk.CmdPipelineBarrier2 != nil || vk.CmdPipelineBarrier2KHR != nil
+	if vk.CmdPipelineBarrier2 != nil {
+		vkCmdPipelineBarrier2 = vk.CmdPipelineBarrier2
+	} else {
+		vkCmdPipelineBarrier2 = vk.CmdPipelineBarrier2KHR
+	}
 
-	assert(has_begin_rendering, "Neither vkCmdBeginRendering nor vkCmdBeginRenderingKHR loaded")
-	assert(has_end_rendering, "Neither vkCmdEndRendering nor vkCmdEndRenderingKHR loaded")
+	if vk.CmdBeginRendering != nil {
+		vkCmdBeginRendering = vk.CmdBeginRendering
+	} else {
+		vkCmdBeginRendering = vk.CmdBeginRenderingKHR
+	}
+
+	if vk.CmdEndRendering != nil {
+		vkCmdEndRendering = vk.CmdEndRendering
+	} else {
+		vkCmdEndRendering = vk.CmdEndRenderingKHR
+	}
+
+	assert(vkCmdBeginRendering != nil, "Neither vkCmdBeginRendering nor vkCmdBeginRenderingKHR loaded")
+	assert(vkCmdEndRendering != nil, "Neither vkCmdEndRendering nor vkCmdEndRenderingKHR loaded")
 	assert(
-		has_pipeline_barrier2,
+		vkCmdPipelineBarrier2 != nil,
 		"Neither vkCmdPipelineBarrier2 nor vkCmdPipelineBarrier2KHR loaded",
 	)
 
@@ -917,30 +944,6 @@ wait_for_non_zero_framebuffer :: proc(window: glfw.WindowHandle) -> bool {
 // Command recording
 // -----------------------------------------------------------------------
 
-cmd_pipeline_barrier2 :: proc(cmd: vk.CommandBuffer, dependency_info: ^vk.DependencyInfo) {
-	if vk.CmdPipelineBarrier2 != nil {
-		vk.CmdPipelineBarrier2(cmd, dependency_info)
-		return
-	}
-	vk.CmdPipelineBarrier2KHR(cmd, dependency_info)
-}
-
-cmd_begin_rendering :: proc(cmd: vk.CommandBuffer, rendering_info: ^vk.RenderingInfo) {
-	if vk.CmdBeginRendering != nil {
-		vk.CmdBeginRendering(cmd, rendering_info)
-		return
-	}
-	vk.CmdBeginRenderingKHR(cmd, rendering_info)
-}
-
-cmd_end_rendering :: proc(cmd: vk.CommandBuffer) {
-	if vk.CmdEndRendering != nil {
-		vk.CmdEndRendering(cmd)
-		return
-	}
-	vk.CmdEndRenderingKHR(cmd)
-}
-
 record_command_buffer :: proc(
 	cmd: vk.CommandBuffer,
 	swapchain_image: vk.Image,
@@ -979,7 +982,7 @@ record_command_buffer :: proc(
 		pImageMemoryBarriers    = &begin_barrier,
 	}
 
-	cmd_pipeline_barrier2(cmd, &dependency_info)
+	vkCmdPipelineBarrier2(cmd, &dependency_info)
 
 	clear := clear_color
 	clear_value := vk.ClearValue {
@@ -1005,7 +1008,7 @@ record_command_buffer :: proc(
 		pColorAttachments    = &color_attachment,
 	}
 
-	cmd_begin_rendering(cmd, &render_info)
+	vkCmdBeginRendering(cmd, &render_info)
 
 	// Bind pipeline and set dynamic state
 	vk.CmdBindPipeline(cmd, .GRAPHICS, pipeline)
@@ -1022,7 +1025,7 @@ record_command_buffer :: proc(
 		vk.CmdDraw(cmd, 6, u32(quad_count), 0, 0)
 	}
 
-	cmd_end_rendering(cmd)
+	vkCmdEndRendering(cmd)
 
 	// Transition swapchain image to present layout
 	end_barrier := vk.ImageMemoryBarrier2 {
@@ -1042,7 +1045,7 @@ record_command_buffer :: proc(
 		imageMemoryBarrierCount = 1,
 		pImageMemoryBarriers    = &end_barrier,
 	}
-	cmd_pipeline_barrier2(cmd, &end_dependency_info)
+	vkCmdPipelineBarrier2(cmd, &end_dependency_info)
 
 	if vk.EndCommandBuffer(cmd) != .SUCCESS {
 		return false
