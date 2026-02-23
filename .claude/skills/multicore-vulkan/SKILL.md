@@ -126,9 +126,108 @@ current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT
 | `VkSemaphore` (render_finished) | GPU ↔ GPU | Rendering is done, safe to present |
 | `VkPipelineBarrier` | GPU internal | Memory/layout transitions (e.g., UNDEFINED → COLOR_ATTACHMENT) |
 
+## Dynamic Rendering (Vulkan 1.3)
+
+**Never create VkRenderPass or VkFramebuffer objects.** Use dynamic rendering exclusively.
+
+Instead of baking render targets into static objects, pass attachments directly to the command buffer:
+
+```
+// In go-narrow phase, after acquiring swapchain image:
+color_attachment := vk.RenderingAttachmentInfo {
+    sType       = .RENDERING_ATTACHMENT_INFO,
+    imageView   = swapchain_image_views[image_index],
+    imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+    loadOp      = .CLEAR,
+    storeOp     = .STORE,
+    clearValue  = { color = { float32 = {0.1, 0.1, 0.1, 1.0} } },
+}
+depth_attachment := vk.RenderingAttachmentInfo {
+    sType       = .RENDERING_ATTACHMENT_INFO,
+    imageView   = depth_image_view,
+    imageLayout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    loadOp      = .CLEAR,
+    storeOp     = .DONT_CARE,
+    clearValue  = { depthStencil = { depth = 1.0 } },
+}
+render_info := vk.RenderingInfo {
+    sType                = .RENDERING_INFO,
+    renderArea           = { extent = { width, height } },
+    layerCount           = 1,
+    colorAttachmentCount = 1,
+    pColorAttachments    = &color_attachment,
+    pDepthAttachment     = &depth_attachment,
+}
+vk.CmdBeginRendering(cmd, &render_info)
+// ... bind pipeline, descriptor sets, draw ...
+vk.CmdEndRendering(cmd)
+```
+
+### Pipeline Creation Without VkRenderPass
+
+Set `renderPass = VK_NULL_HANDLE` and chain a `VkPipelineRenderingCreateInfo`:
+
+```
+pipeline_rendering_info := vk.PipelineRenderingCreateInfo {
+    sType                   = .PIPELINE_RENDERING_CREATE_INFO,
+    colorAttachmentCount    = 1,
+    pColorAttachmentFormats = &swapchain_format,
+    depthAttachmentFormat   = depth_format,
+}
+pipeline_info := vk.GraphicsPipelineCreateInfo {
+    // ... stages, viewport, rasterization, etc ...
+    renderPass = vk.RenderPass(0), // VK_NULL_HANDLE
+    pNext      = &pipeline_rendering_info,
+}
+```
+
+### Required Image Layout Transitions
+
+Before beginning dynamic rendering, transition the swapchain image layout with pipeline barriers:
+
+```
+// UNDEFINED → COLOR_ATTACHMENT_OPTIMAL before rendering
+// COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR after rendering
+```
+
 ## Secondary Command Buffers (Alternative)
 
-If rendering is too complex for a single indirect draw:
+If rendering is too complex for a single indirect draw, record Vulkan commands in parallel across lanes.
+
+With dynamic rendering, secondary buffers inherit attachment *formats* (not a VkRenderPass object):
+
+```
+// Go Wide: each lane sets up inheritance and records
+inheritance_rendering := vk.CommandBufferInheritanceRenderingInfo {
+    sType                   = .COMMAND_BUFFER_INHERITANCE_RENDERING_INFO,
+    colorAttachmentCount    = 1,
+    pColorAttachmentFormats = &swapchain_format,
+    depthAttachmentFormat   = depth_format,
+    rasterizationSamples    = {._1},
+}
+inheritance_info := vk.CommandBufferInheritanceInfo {
+    sType = .COMMAND_BUFFER_INHERITANCE_INFO,
+    pNext = &inheritance_rendering,
+}
+begin_info := vk.CommandBufferBeginInfo {
+    sType = .COMMAND_BUFFER_BEGIN_INFO,
+    flags = { .RENDER_PASS_CONTINUE, .ONE_TIME_SUBMIT },
+    pInheritanceInfo = &inheritance_info,
+}
+secondary_cmd := command_buffers[current_frame][lane_idx()]
+vk.BeginCommandBuffer(secondary_cmd, &begin_info)
+// ... lane-specific draw calls ...
+vk.EndCommandBuffer(secondary_cmd)
+
+lane_sync()
+
+// Go Narrow: Lane 0 executes all secondaries
+if lane_idx() == 0 {
+    // Begin primary, begin dynamic rendering, then:
+    vk.CmdExecuteCommands(primary_cmd, u32(core_count), &secondary_cmds[0])
+    vk.CmdEndRendering(primary_cmd)
+}
+```
 
 - **Go Wide**: Each lane records a `VK_COMMAND_BUFFER_LEVEL_SECONDARY` from its own pool
 - **Go Narrow**: Lane 0 calls `vkCmdExecuteCommands` to bundle all secondary buffers into one primary
@@ -151,6 +250,9 @@ Dedicate specific lanes to disk I/O:
 - Always wait on frame fence before reusing that frame's resources
 - Swapchain acquire → wait semaphore before rendering; render done → signal semaphore before present
 - Only Lane 0 talks to the Vulkan driver for submission and presentation
+- Never create VkRenderPass or VkFramebuffer — use dynamic rendering exclusively
+- Always transition image layouts via pipeline barriers before/after `vkCmdBeginRendering`
+- Set `renderPass = VK_NULL_HANDLE` in pipeline creation; use `VkPipelineRenderingCreateInfo` instead
 
 ## Anti-Patterns (Never Do This)
 
@@ -159,3 +261,5 @@ Dedicate specific lanes to disk I/O:
 - Never map/unmap buffers per frame — keep them persistently mapped
 - Never use mutexes to protect Vulkan command recording — use per-lane pools
 - Never record all commands on a single thread — go wide with secondary buffers or parallel indirect generation
+- Never create VkRenderPass or VkFramebuffer objects — they are obsolete in Vulkan 1.3
+- Never pass a VkRenderPass to secondary command buffer inheritance — use `VkCommandBufferInheritanceRenderingInfo`
