@@ -95,6 +95,21 @@ game_library_loaded_path :: proc() -> string {
 
 MAX_FRAMES_IN_FLIGHT :: 2
 
+Frame_Context :: struct {
+	descriptor_set: vk.DescriptorSet,
+	quad_ssbo:      Mapped_Buffer,
+
+	command_pools: [MAX_LANES]vk.CommandPool,
+	cmds:          [MAX_LANES]vk.CommandBuffer,
+
+	image_available_semaphore: vk.Semaphore,
+	in_flight_fence:           vk.Fence,
+}
+
+Image_Context :: struct {
+	render_finished_semaphore: vk.Semaphore,
+}
+
 Engine :: struct {
 	// Core Vulkan
 	instance:        vk.Instance,
@@ -123,17 +138,8 @@ Engine :: struct {
 	// Bindless resources
 	descriptor_layout: vk.DescriptorSetLayout,
 	descriptor_pool:   vk.DescriptorPool,
-	descriptor_sets:   [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet,
-	quad_ssbos:        [MAX_FRAMES_IN_FLIGHT]Mapped_Buffer,
-
-	// Commands (per frame, per lane)
-	command_pools: [MAX_FRAMES_IN_FLIGHT][MAX_LANES]vk.CommandPool,
-	cmds:          [MAX_FRAMES_IN_FLIGHT][MAX_LANES]vk.CommandBuffer,
-
-	// Synchronization (per frame)
-	image_available_semaphores: [MAX_FRAMES_IN_FLIGHT]vk.Semaphore,
-	render_finished_semaphores: [MAX_FRAMES_IN_FLIGHT]vk.Semaphore,
-	in_flight_fences:           [MAX_FRAMES_IN_FLIGHT]vk.Fence,
+	frames:            [MAX_FRAMES_IN_FLIGHT]Frame_Context,
+	images:            []Image_Context,
 
 	// Frame tracking
 	current_frame: u32,
@@ -330,7 +336,7 @@ create_bindless_resources :: proc(e: ^Engine) -> bool {
 			log_error("Failed to create quad SSBO")
 			return false
 		}
-		e.quad_ssbos[i] = buf
+		e.frames[i].quad_ssbo = buf
 	}
 
 	pool, ok_pool := create_quad_descriptor_pool(e.gpu_context.device)
@@ -350,20 +356,27 @@ create_bindless_resources :: proc(e: ^Engine) -> bool {
 		descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
 		pSetLayouts        = &layouts[0],
 	}
+	descriptor_sets: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet
 	if vk.AllocateDescriptorSets(
 		   e.gpu_context.device,
 		   &alloc_info,
-		   &e.descriptor_sets[0],
+		   &descriptor_sets[0],
 	   ) !=
 	   .SUCCESS {
 		log_error("Failed to allocate descriptor sets")
 		return false
 	}
 
+	quad_ssbos: [MAX_FRAMES_IN_FLIGHT]Mapped_Buffer
+	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+		e.frames[i].descriptor_set = descriptor_sets[i]
+		quad_ssbos[i] = e.frames[i].quad_ssbo
+	}
+
 	update_quad_descriptor_sets(
 		e.gpu_context.device,
-		e.descriptor_sets[:],
-		e.quad_ssbos[:],
+		descriptor_sets[:],
+		quad_ssbos[:],
 	)
 
 	return true
@@ -398,7 +411,7 @@ create_command_pools :: proc(e: ^Engine) -> bool {
 				   e.gpu_context.device,
 				   &pool_info,
 				   nil,
-				   &e.command_pools[f][l],
+				   &e.frames[f].command_pools[l],
 			   ) !=
 			   .SUCCESS {
 				log_error("Failed to create the Vulkan CommandPool")
@@ -406,14 +419,14 @@ create_command_pools :: proc(e: ^Engine) -> bool {
 			}
 			alloc_info := vk.CommandBufferAllocateInfo {
 				sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
-				commandPool        = e.command_pools[f][l],
+				commandPool        = e.frames[f].command_pools[l],
 				level              = .PRIMARY,
 				commandBufferCount = 1,
 			}
 			if vk.AllocateCommandBuffers(
 				   e.gpu_context.device,
 				   &alloc_info,
-				   &e.cmds[f][l],
+				   &e.frames[f].cmds[l],
 			   ) !=
 			   .SUCCESS {
 				log_error("Failed to allocate Vulkan CommandBuffers")
@@ -421,6 +434,52 @@ create_command_pools :: proc(e: ^Engine) -> bool {
 			}
 		}
 	}
+	return true
+}
+
+destroy_render_finished_semaphores :: proc(e: ^Engine) {
+	if len(e.images) == 0 {
+		return
+	}
+
+	for image in e.images {
+		if image.render_finished_semaphore != 0 {
+			vk.DestroySemaphore(e.gpu_context.device, image.render_finished_semaphore, nil)
+		}
+	}
+
+	delete(e.images, context.allocator)
+	e.images = nil
+}
+
+create_render_finished_semaphores :: proc(e: ^Engine) -> bool {
+	destroy_render_finished_semaphores(e)
+
+	count := len(e.swapchain_context.images)
+	if count == 0 {
+		return false
+	}
+
+	e.images = make([]Image_Context, count, context.allocator)
+	semaphore_info := vk.SemaphoreCreateInfo{sType = .SEMAPHORE_CREATE_INFO}
+
+	for i in 0 ..< count {
+		if vk.CreateSemaphore(
+			   e.gpu_context.device,
+			   &semaphore_info,
+			   nil,
+			   &e.images[i].render_finished_semaphore,
+		   ) !=
+		   .SUCCESS {
+			for j in 0 ..< i {
+				vk.DestroySemaphore(e.gpu_context.device, e.images[j].render_finished_semaphore, nil)
+			}
+			delete(e.images, context.allocator)
+			e.images = nil
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -435,28 +494,24 @@ create_sync_objects :: proc(e: ^Engine) -> bool {
 			   e.gpu_context.device,
 			   &semaphore_info,
 			   nil,
-			   &e.image_available_semaphores[i],
+			   &e.frames[i].image_available_semaphore,
 		   ) !=
 		   .SUCCESS {
 			log_error("Failed to create image_available semaphore")
 			return false
 		}
-		if vk.CreateSemaphore(
-			   e.gpu_context.device,
-			   &semaphore_info,
-			   nil,
-			   &e.render_finished_semaphores[i],
-		   ) !=
-		   .SUCCESS {
-			log_error("Failed to create render_finished semaphore")
-			return false
-		}
-		if vk.CreateFence(e.gpu_context.device, &fence_info, nil, &e.in_flight_fences[i]) !=
+		if vk.CreateFence(e.gpu_context.device, &fence_info, nil, &e.frames[i].in_flight_fence) !=
 		   .SUCCESS {
 			log_error("Failed to create in_flight fence")
 			return false
 		}
 	}
+
+	if !create_render_finished_semaphores(e) {
+		log_error("Failed to create render_finished semaphores")
+		return false
+	}
+
 	return true
 }
 
@@ -495,8 +550,10 @@ cleanup :: proc(e: ^Engine) {
 	delete(e.frame_commands.quads)
 
 	if e.gpu_context.device != nil {
+		destroy_render_finished_semaphores(e)
+
 		for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
-			destroy_mapped_buffer(e.gpu_context.device, &e.quad_ssbos[i])
+			destroy_mapped_buffer(e.gpu_context.device, &e.frames[i].quad_ssbo)
 		}
 		if e.descriptor_pool != 0 {
 			vk.DestroyDescriptorPool(e.gpu_context.device, e.descriptor_pool, nil)
@@ -505,11 +562,10 @@ cleanup :: proc(e: ^Engine) {
 			vk.DestroyDescriptorSetLayout(e.gpu_context.device, e.descriptor_layout, nil)
 		}
 		for f in 0 ..< MAX_FRAMES_IN_FLIGHT {
-			vk.DestroyFence(e.gpu_context.device, e.in_flight_fences[f], nil)
-			vk.DestroySemaphore(e.gpu_context.device, e.render_finished_semaphores[f], nil)
-			vk.DestroySemaphore(e.gpu_context.device, e.image_available_semaphores[f], nil)
+			vk.DestroyFence(e.gpu_context.device, e.frames[f].in_flight_fence, nil)
+			vk.DestroySemaphore(e.gpu_context.device, e.frames[f].image_available_semaphore, nil)
 			for l in 0 ..< MAX_LANES {
-				vk.DestroyCommandPool(e.gpu_context.device, e.command_pools[f][l], nil)
+				vk.DestroyCommandPool(e.gpu_context.device, e.frames[f].command_pools[l], nil)
 			}
 		}
 		vk.DestroyPipeline(e.gpu_context.device, e.graphics_pipeline, nil)
@@ -657,12 +713,13 @@ run_main_loop :: proc(e: ^Engine) {
 			}
 
 			quad_count := min(len(e.frame_commands.quads), MAX_QUADS)
+			frame := &e.frames[int(e.current_frame)]
 
 			// Wait for the previous use of this frame slot to finish
 			wait_result := vk.WaitForFences(
 				e.gpu_context.device,
 				1,
-				&e.in_flight_fences[e.current_frame],
+				&frame.in_flight_fence,
 				true,
 				~u64(0),
 			)
@@ -686,7 +743,7 @@ run_main_loop :: proc(e: ^Engine) {
 			// Copy quad data to current frame SSBO after fence wait
 			if quad_count > 0 {
 				mem.copy(
-					e.quad_ssbos[e.current_frame].mapped,
+					frame.quad_ssbo.mapped,
 					raw_data(e.frame_commands.quads),
 					quad_count * size_of(Quad_Command),
 				)
@@ -698,7 +755,7 @@ run_main_loop :: proc(e: ^Engine) {
 				e.gpu_context.device,
 				e.swapchain_context.handle,
 				~u64(0),
-				e.image_available_semaphores[e.current_frame],
+				frame.image_available_semaphore,
 				vk.Fence(0),
 				&image_index,
 			)
@@ -722,6 +779,9 @@ run_main_loop :: proc(e: ^Engine) {
 						log_error("Failed to recreate swapchain/pipeline after acquire")
 						e.quit = true
 					}
+				} else if !create_render_finished_semaphores(e) {
+					log_error("Failed to recreate render_finished semaphores")
+					e.quit = true
 				}
 				lane_sync()
 				continue
@@ -737,7 +797,7 @@ run_main_loop :: proc(e: ^Engine) {
 				return
 			}
 
-			if vk.ResetCommandBuffer(e.cmds[e.current_frame][0], {}) != .SUCCESS {
+			if vk.ResetCommandBuffer(frame.cmds[0], {}) != .SUCCESS {
 				log_error("Failed to reset command buffer")
 				e.quit = true
 				lane_sync()
@@ -745,13 +805,13 @@ run_main_loop :: proc(e: ^Engine) {
 			}
 
 			if !record_command_buffer(
-				e.cmds[e.current_frame][0],
+				frame.cmds[0],
 				e.swapchain_context.images[image_index],
 				e.swapchain_context.image_views[image_index],
 				e.swapchain_context.extent,
 				e.graphics_pipeline,
 				e.pipeline_layout,
-				e.descriptor_sets[e.current_frame],
+				frame.descriptor_set,
 				e.frame_commands.clear_color,
 				quad_count,
 			) {
@@ -764,7 +824,7 @@ run_main_loop :: proc(e: ^Engine) {
 			if vk.ResetFences(
 				   e.gpu_context.device,
 				   1,
-				   &e.in_flight_fences[e.current_frame],
+				   &frame.in_flight_fence,
 			   ) !=
 			   .SUCCESS {
 				log_error("ResetFences failed")
@@ -774,14 +834,14 @@ run_main_loop :: proc(e: ^Engine) {
 			}
 
 			wait_stages := vk.PipelineStageFlags{.COLOR_ATTACHMENT_OUTPUT}
-			render_finished_semaphore := e.render_finished_semaphores[e.current_frame]
+			render_finished_semaphore := e.images[int(image_index)].render_finished_semaphore
 			submit_info := vk.SubmitInfo {
 				sType                = .SUBMIT_INFO,
 				waitSemaphoreCount   = 1,
-				pWaitSemaphores      = &e.image_available_semaphores[e.current_frame],
+				pWaitSemaphores      = &frame.image_available_semaphore,
 				pWaitDstStageMask    = &wait_stages,
 				commandBufferCount   = 1,
-				pCommandBuffers      = &e.cmds[e.current_frame][0],
+				pCommandBuffers      = &frame.cmds[0],
 				signalSemaphoreCount = 1,
 				pSignalSemaphores    = &render_finished_semaphore,
 			}
@@ -789,7 +849,7 @@ run_main_loop :: proc(e: ^Engine) {
 				   e.gpu_context.graphics_queue,
 				   1,
 				   &submit_info,
-				   e.in_flight_fences[e.current_frame],
+				   frame.in_flight_fence,
 			   ) !=
 			   .SUCCESS {
 				log_error("Failed to submit graphics queue")
@@ -827,6 +887,9 @@ run_main_loop :: proc(e: ^Engine) {
 						log_error("Failed to recreate swapchain/pipeline after present")
 						e.quit = true
 					}
+				} else if !create_render_finished_semaphores(e) {
+					log_error("Failed to recreate render_finished semaphores")
+					e.quit = true
 				}
 			case .ERROR_DEVICE_LOST:
 				log_error("Device lost in QueuePresentKHR")

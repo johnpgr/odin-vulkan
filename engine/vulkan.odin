@@ -1,8 +1,8 @@
 package engine
 
+import "core:fmt"
 import "core:mem"
 import "core:os"
-import "core:fmt"
 import glfw "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -37,7 +37,10 @@ find_memory_type :: proc(
 	physical_device: vk.PhysicalDevice,
 	type_filter: u32,
 	properties: vk.MemoryPropertyFlags,
-) -> (u32, bool) {
+) -> (
+	u32,
+	bool,
+) {
 	mem_props: vk.PhysicalDeviceMemoryProperties
 	vk.GetPhysicalDeviceMemoryProperties(physical_device, &mem_props)
 	for i in 0 ..< mem_props.memoryTypeCount {
@@ -54,7 +57,10 @@ create_mapped_buffer :: proc(
 	physical_device: vk.PhysicalDevice,
 	size: vk.DeviceSize,
 	usage: vk.BufferUsageFlags,
-) -> (Mapped_Buffer, bool) {
+) -> (
+	Mapped_Buffer,
+	bool,
+) {
 	buffer_info := vk.BufferCreateInfo {
 		sType       = .BUFFER_CREATE_INFO,
 		size        = size,
@@ -171,7 +177,12 @@ find_queue_families :: proc(
 			}
 
 			if !found_present {
-				result := vk.GetPhysicalDeviceSurfaceSupportKHR(device, u32(i), surface, &found_present)
+				result := vk.GetPhysicalDeviceSurfaceSupportKHR(
+					device,
+					u32(i),
+					surface,
+					&found_present,
+				)
 				if result != .SUCCESS {
 					continue
 				}
@@ -193,22 +204,50 @@ find_queue_families :: proc(
 // Device helpers
 // -----------------------------------------------------------------------
 
-device_extension_available :: proc(device: vk.PhysicalDevice, name: cstring) -> bool {
+Device_Extensions :: struct {
+	device: vk.PhysicalDevice,
+	props:  []vk.ExtensionProperties,
+}
+
+@(private)
+g_device_extensions: Device_Extensions
+
+cache_device_extensions :: proc(device: vk.PhysicalDevice) -> bool {
+	if g_device_extensions.device == device && len(g_device_extensions.props) > 0 {
+		return true
+	}
+
+	if len(g_device_extensions.props) > 0 {
+		delete(g_device_extensions.props, context.allocator)
+		g_device_extensions = {}
+	}
+
 	count: u32 = 0
 	if vk.EnumerateDeviceExtensionProperties(device, nil, &count, nil) != .SUCCESS || count == 0 {
 		return false
 	}
 
-	props := make([]vk.ExtensionProperties, int(count), context.temp_allocator)
-	defer delete(props, context.temp_allocator)
-
+	props := make([]vk.ExtensionProperties, int(count), context.allocator)
 	if vk.EnumerateDeviceExtensionProperties(device, nil, &count, raw_data(props)) != .SUCCESS {
+		delete(props, context.allocator)
+		return false
+	}
+
+	g_device_extensions = Device_Extensions {
+		device = device,
+		props  = props,
+	}
+	return true
+}
+
+device_extension_available :: proc(device: vk.PhysicalDevice, name: cstring) -> bool {
+	if !cache_device_extensions(device) {
 		return false
 	}
 
 	target := string(name)
-	for i in 0 ..< int(count) {
-		ext_name := string(cast(cstring)&props[i].extensionName[0])
+	for i in 0 ..< len(g_device_extensions.props) {
+		ext_name := string(cast(cstring)&g_device_extensions.props[i].extensionName[0])
 		if ext_name == target {
 			return true
 		}
@@ -259,13 +298,26 @@ create_gpu_context :: proc(
 
 	// Specify the device extensions we need (swapchain is essencial for rendering)
 	device_extensions := make([dynamic]cstring, context.temp_allocator)
+	// Required: presentation support for window surfaces.
+	append(&device_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
 
-	if device_extension_available(physical_device, vk.KHR_SWAPCHAIN_EXTENSION_NAME) {
-		append(&device_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+	if !device_extension_available(physical_device, vk.KHR_SWAPCHAIN_EXTENSION_NAME) {
+		return {}, false
 	}
 
+	// Optional on Apple/MoltenVK: required when implementation exposes portability subset.
 	if device_extension_available(physical_device, vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME) {
 		append(&device_extensions, vk.KHR_PORTABILITY_SUBSET_EXTENSION_NAME)
+	}
+
+	// Optional fallback for Vulkan < 1.3 implementations exposing KHR dynamic rendering.
+	if device_extension_available(physical_device, vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME) {
+		append(&device_extensions, vk.KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
+	}
+
+	// Optional fallback for Vulkan < 1.3 implementations exposing KHR synchronization2.
+	if device_extension_available(physical_device, vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME) {
+		append(&device_extensions, vk.KHR_SYNCHRONIZATION_2_EXTENSION_NAME)
 	}
 
 	// Specify which physical device features we'll use
@@ -307,9 +359,16 @@ create_gpu_context :: proc(
 
 	vk.load_proc_addresses_device(device)
 
-	assert(vk.CmdBeginRendering != nil, "vkCmdBeginRendering not loaded — dynamic rendering extension missing")
-	assert(vk.CmdEndRendering != nil, "vkCmdEndRendering not loaded — dynamic rendering extension missing")
-	assert(vk.CmdPipelineBarrier2 != nil, "vkCmdPipelineBarrier2 not loaded — synchronization2 extension missing")
+	has_begin_rendering := vk.CmdBeginRendering != nil || vk.CmdBeginRenderingKHR != nil
+	has_end_rendering := vk.CmdEndRendering != nil || vk.CmdEndRenderingKHR != nil
+	has_pipeline_barrier2 := vk.CmdPipelineBarrier2 != nil || vk.CmdPipelineBarrier2KHR != nil
+
+	assert(has_begin_rendering, "Neither vkCmdBeginRendering nor vkCmdBeginRenderingKHR loaded")
+	assert(has_end_rendering, "Neither vkCmdEndRendering nor vkCmdEndRenderingKHR loaded")
+	assert(
+		has_pipeline_barrier2,
+		"Neither vkCmdPipelineBarrier2 nor vkCmdPipelineBarrier2KHR loaded",
+	)
 
 	graphics_queue, present_queue: vk.Queue
 	vk.GetDeviceQueue(device, queue_families.graphics_family, 0, &graphics_queue)
@@ -379,7 +438,7 @@ pick_physical_device :: proc(
 
 	for d in devices {
 		vk.GetPhysicalDeviceProperties(d, &props)
-		if props.deviceType == .DISCRETE_GPU {
+		if props.deviceType == .DISCRETE_GPU || props.deviceType == .INTEGRATED_GPU {
 			device = d
 			break
 		}
@@ -402,22 +461,47 @@ has_extension_name :: proc(exts: []cstring, target: cstring) -> bool {
 	return false
 }
 
-instance_extension_available :: proc(name: cstring) -> bool {
+Instance_Extensions :: struct {
+	initialized: bool,
+	props:       []vk.ExtensionProperties,
+}
+
+@(private)
+g_instance_extensions: Instance_Extensions
+
+cache_instance_extensions :: proc() -> bool {
+	if g_instance_extensions.initialized {
+		return len(g_instance_extensions.props) > 0
+	}
+
 	count: u32 = 0
 	if vk.EnumerateInstanceExtensionProperties(nil, &count, nil) != .SUCCESS || count == 0 {
+		g_instance_extensions.initialized = true
 		return false
 	}
 
-	props := make([]vk.ExtensionProperties, int(count), context.temp_allocator)
-	defer delete(props, context.temp_allocator)
-
+	props := make([]vk.ExtensionProperties, int(count), context.allocator)
 	if vk.EnumerateInstanceExtensionProperties(nil, &count, raw_data(props)) != .SUCCESS {
+		delete(props, context.allocator)
+		g_instance_extensions.initialized = true
+		return false
+	}
+
+	g_instance_extensions = Instance_Extensions {
+		initialized = true,
+		props       = props,
+	}
+	return true
+}
+
+instance_extension_available :: proc(name: cstring) -> bool {
+	if !cache_instance_extensions() {
 		return false
 	}
 
 	name_str := string(name)
-	for i in 0 ..< int(count) {
-		ext_name := string(cast(cstring)&props[i].extensionName[0])
+	for i in 0 ..< len(g_instance_extensions.props) {
+		ext_name := string(cast(cstring)&g_instance_extensions.props[i].extensionName[0])
 		if ext_name == name_str {
 			return true
 		}
@@ -444,15 +528,18 @@ surface_format_supports_usage :: proc(
 	usage: vk.ImageUsageFlags,
 ) -> bool {
 	props: vk.ImageFormatProperties
-	return vk.GetPhysicalDeviceImageFormatProperties(
-		physical_device,
-		format,
-		.D2,
-		.OPTIMAL,
-		usage,
-		{},
-		&props,
-	) == .SUCCESS
+	return(
+		vk.GetPhysicalDeviceImageFormatProperties(
+			physical_device,
+			format,
+			.D2,
+			.OPTIMAL,
+			usage,
+			{},
+			&props,
+		) ==
+		.SUCCESS \
+	)
 }
 
 // -----------------------------------------------------------------------
@@ -830,6 +917,30 @@ wait_for_non_zero_framebuffer :: proc(window: glfw.WindowHandle) -> bool {
 // Command recording
 // -----------------------------------------------------------------------
 
+cmd_pipeline_barrier2 :: proc(cmd: vk.CommandBuffer, dependency_info: ^vk.DependencyInfo) {
+	if vk.CmdPipelineBarrier2 != nil {
+		vk.CmdPipelineBarrier2(cmd, dependency_info)
+		return
+	}
+	vk.CmdPipelineBarrier2KHR(cmd, dependency_info)
+}
+
+cmd_begin_rendering :: proc(cmd: vk.CommandBuffer, rendering_info: ^vk.RenderingInfo) {
+	if vk.CmdBeginRendering != nil {
+		vk.CmdBeginRendering(cmd, rendering_info)
+		return
+	}
+	vk.CmdBeginRenderingKHR(cmd, rendering_info)
+}
+
+cmd_end_rendering :: proc(cmd: vk.CommandBuffer) {
+	if vk.CmdEndRendering != nil {
+		vk.CmdEndRendering(cmd)
+		return
+	}
+	vk.CmdEndRenderingKHR(cmd)
+}
+
 record_command_buffer :: proc(
 	cmd: vk.CommandBuffer,
 	swapchain_image: vk.Image,
@@ -868,7 +979,7 @@ record_command_buffer :: proc(
 		pImageMemoryBarriers    = &begin_barrier,
 	}
 
-	vk.CmdPipelineBarrier2(cmd, &dependency_info)
+	cmd_pipeline_barrier2(cmd, &dependency_info)
 
 	clear := clear_color
 	clear_value := vk.ClearValue {
@@ -894,7 +1005,7 @@ record_command_buffer :: proc(
 		pColorAttachments    = &color_attachment,
 	}
 
-	vk.CmdBeginRendering(cmd, &render_info)
+	cmd_begin_rendering(cmd, &render_info)
 
 	// Bind pipeline and set dynamic state
 	vk.CmdBindPipeline(cmd, .GRAPHICS, pipeline)
@@ -911,7 +1022,7 @@ record_command_buffer :: proc(
 		vk.CmdDraw(cmd, 6, u32(quad_count), 0, 0)
 	}
 
-	vk.CmdEndRendering(cmd)
+	cmd_end_rendering(cmd)
 
 	// Transition swapchain image to present layout
 	end_barrier := vk.ImageMemoryBarrier2 {
@@ -931,7 +1042,7 @@ record_command_buffer :: proc(
 		imageMemoryBarrierCount = 1,
 		pImageMemoryBarriers    = &end_barrier,
 	}
-	vk.CmdPipelineBarrier2(cmd, &end_dependency_info)
+	cmd_pipeline_barrier2(cmd, &end_dependency_info)
 
 	if vk.EndCommandBuffer(cmd) != .SUCCESS {
 		return false
@@ -949,7 +1060,7 @@ has_suffix :: proc(value: string, suffix: string) -> bool {
 		return false
 	}
 
-	return value[len(value)-len(suffix):] == suffix
+	return value[len(value) - len(suffix):] == suffix
 }
 
 load_shader :: proc(
