@@ -26,7 +26,7 @@ Split entity data into two layers:
 Player_Data :: struct {
     health:        f32,
     stamina:       f32,
-    input_dir:     [2]f32,
+    input_dir:     vec2,
 }
 
 Enemy_Data :: struct {
@@ -57,10 +57,10 @@ Entity :: struct {
     // Shared fields (common to all entity types)
     flags:        Entity_Flags,
 
-    position:     [3]f32,
-    rotation:     [3]f32,
-    scale:        [3]f32,
-    velocity:     [3]f32,
+    position:     vec3,
+    rotation:     vec3,
+    scale:        vec3,
+    velocity:     vec3,
 
     // Hierarchy (intrusive tree via indices)
     parent_idx:       u32,
@@ -71,7 +71,7 @@ Entity :: struct {
     // Rendering
     mesh_id:      u32,
     material_idx: u32,
-    transform:    matrix[4,4]f32,
+    transform:    mat4,
 
     // Type-specific data
     data: Entity_Data,
