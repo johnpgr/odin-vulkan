@@ -46,6 +46,11 @@ Mapped_Buffer :: struct {
 	size:   vk.DeviceSize,
 }
 
+Gpu_Buffer :: struct {
+	handle: vk.Buffer,
+	memory: vk.DeviceMemory,
+}
+
 find_memory_type :: proc(
 	physical_device: vk.PhysicalDevice,
 	type_filter: u32,
@@ -136,6 +141,258 @@ destroy_mapped_buffer :: proc(device: vk.Device, buf: ^Mapped_Buffer) {
 		vk.FreeMemory(device, buf.memory, nil)
 	}
 	buf^ = {}
+}
+
+destroy_gpu_buffer :: proc(device: vk.Device, buf: ^Gpu_Buffer) {
+	if buf.handle != 0 {
+		vk.DestroyBuffer(device, buf.handle, nil)
+	}
+	if buf.memory != 0 {
+		vk.FreeMemory(device, buf.memory, nil)
+	}
+	buf^ = {}
+}
+
+create_depth_image :: proc(
+	device: vk.Device,
+	physical_device: vk.PhysicalDevice,
+	extent: vk.Extent2D,
+) -> (
+	vk.Image,
+	vk.ImageView,
+	vk.DeviceMemory,
+	bool,
+) {
+	image_info := vk.ImageCreateInfo {
+		sType         = .IMAGE_CREATE_INFO,
+		imageType     = .D2,
+		format        = .D32_SFLOAT,
+		extent        = {extent.width, extent.height, 1},
+		mipLevels     = 1,
+		arrayLayers   = 1,
+		samples       = {._1},
+		tiling        = .OPTIMAL,
+		usage         = {.DEPTH_STENCIL_ATTACHMENT},
+		sharingMode   = .EXCLUSIVE,
+		initialLayout = .UNDEFINED,
+	}
+
+	image: vk.Image
+	if vk.CreateImage(device, &image_info, nil, &image) != .SUCCESS {
+		return {}, {}, {}, false
+	}
+
+	mem_reqs: vk.MemoryRequirements
+	vk.GetImageMemoryRequirements(device, image, &mem_reqs)
+
+	mem_type, ok_mem_type := find_memory_type(
+		physical_device,
+		mem_reqs.memoryTypeBits,
+		{.DEVICE_LOCAL},
+	)
+	if !ok_mem_type {
+		vk.DestroyImage(device, image, nil)
+		return {}, {}, {}, false
+	}
+
+	alloc_info := vk.MemoryAllocateInfo {
+		sType           = .MEMORY_ALLOCATE_INFO,
+		allocationSize  = mem_reqs.size,
+		memoryTypeIndex = mem_type,
+	}
+
+	memory: vk.DeviceMemory
+	if vk.AllocateMemory(device, &alloc_info, nil, &memory) != .SUCCESS {
+		vk.DestroyImage(device, image, nil)
+		return {}, {}, {}, false
+	}
+
+	if vk.BindImageMemory(device, image, memory, 0) != .SUCCESS {
+		vk.FreeMemory(device, memory, nil)
+		vk.DestroyImage(device, image, nil)
+		return {}, {}, {}, false
+	}
+
+	view_info := vk.ImageViewCreateInfo {
+		sType    = .IMAGE_VIEW_CREATE_INFO,
+		image    = image,
+		viewType = .D2,
+		format   = .D32_SFLOAT,
+		subresourceRange = {
+			aspectMask     = {.DEPTH},
+			baseMipLevel   = 0,
+			levelCount     = 1,
+			baseArrayLayer = 0,
+			layerCount     = 1,
+		},
+	}
+
+	view: vk.ImageView
+	if vk.CreateImageView(device, &view_info, nil, &view) != .SUCCESS {
+		vk.FreeMemory(device, memory, nil)
+		vk.DestroyImage(device, image, nil)
+		return {}, {}, {}, false
+	}
+
+	return image, view, memory, true
+}
+
+destroy_depth_image :: proc(
+	device: vk.Device,
+	image: vk.Image,
+	view: vk.ImageView,
+	memory: vk.DeviceMemory,
+) {
+	if view != 0 {
+		vk.DestroyImageView(device, view, nil)
+	}
+	if image != 0 {
+		vk.DestroyImage(device, image, nil)
+	}
+	if memory != 0 {
+		vk.FreeMemory(device, memory, nil)
+	}
+}
+
+create_device_local_buffer :: proc(
+	device: vk.Device,
+	physical_device: vk.PhysicalDevice,
+	command_pool: vk.CommandPool,
+	queue: vk.Queue,
+	data_ptr: rawptr,
+	data_size: vk.DeviceSize,
+	usage: vk.BufferUsageFlags,
+) -> (
+	Gpu_Buffer,
+	bool,
+) {
+	if data_ptr == nil || data_size == 0 {
+		return {}, false
+	}
+
+	staging, ok_staging := create_mapped_buffer(
+		device,
+		physical_device,
+		data_size,
+		{.TRANSFER_SRC},
+	)
+	if !ok_staging {
+		return {}, false
+	}
+	defer destroy_mapped_buffer(device, &staging)
+
+	mem.copy(staging.mapped, data_ptr, int(data_size))
+
+	final_buffer_info := vk.BufferCreateInfo {
+		sType       = .BUFFER_CREATE_INFO,
+		size        = data_size,
+		usage       = usage + {.TRANSFER_DST},
+		sharingMode = .EXCLUSIVE,
+	}
+
+	final_buffer: vk.Buffer
+	if vk.CreateBuffer(device, &final_buffer_info, nil, &final_buffer) != .SUCCESS {
+		return {}, false
+	}
+
+	final_reqs: vk.MemoryRequirements
+	vk.GetBufferMemoryRequirements(device, final_buffer, &final_reqs)
+
+	final_mem_type, ok_final_mem_type := find_memory_type(
+		physical_device,
+		final_reqs.memoryTypeBits,
+		{.DEVICE_LOCAL},
+	)
+	if !ok_final_mem_type {
+		vk.DestroyBuffer(device, final_buffer, nil)
+		return {}, false
+	}
+
+	final_alloc := vk.MemoryAllocateInfo {
+		sType           = .MEMORY_ALLOCATE_INFO,
+		allocationSize  = final_reqs.size,
+		memoryTypeIndex = final_mem_type,
+	}
+	final_memory: vk.DeviceMemory
+	if vk.AllocateMemory(device, &final_alloc, nil, &final_memory) != .SUCCESS {
+		vk.DestroyBuffer(device, final_buffer, nil)
+		return {}, false
+	}
+
+	if vk.BindBufferMemory(device, final_buffer, final_memory, 0) != .SUCCESS {
+		vk.FreeMemory(device, final_memory, nil)
+		vk.DestroyBuffer(device, final_buffer, nil)
+		return {}, false
+	}
+
+	command_alloc := vk.CommandBufferAllocateInfo {
+		sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
+		commandPool        = command_pool,
+		level              = .PRIMARY,
+		commandBufferCount = 1,
+	}
+	copy_cmd: vk.CommandBuffer
+	if vk.AllocateCommandBuffers(device, &command_alloc, &copy_cmd) != .SUCCESS {
+		vk.FreeMemory(device, final_memory, nil)
+		vk.DestroyBuffer(device, final_buffer, nil)
+		return {}, false
+	}
+
+	free_copy_cmd := false
+	defer if free_copy_cmd {
+		vk.FreeCommandBuffers(device, command_pool, 1, &copy_cmd)
+	}
+
+	begin_info := vk.CommandBufferBeginInfo {
+		sType = .COMMAND_BUFFER_BEGIN_INFO,
+		flags = {.ONE_TIME_SUBMIT},
+	}
+	if vk.BeginCommandBuffer(copy_cmd, &begin_info) != .SUCCESS {
+		free_copy_cmd = true
+		vk.FreeMemory(device, final_memory, nil)
+		vk.DestroyBuffer(device, final_buffer, nil)
+		return {}, false
+	}
+
+	copy_region := vk.BufferCopy {
+		srcOffset = 0,
+		dstOffset = 0,
+		size      = data_size,
+	}
+	vk.CmdCopyBuffer(copy_cmd, staging.handle, final_buffer, 1, &copy_region)
+
+	if vk.EndCommandBuffer(copy_cmd) != .SUCCESS {
+		free_copy_cmd = true
+		vk.FreeMemory(device, final_memory, nil)
+		vk.DestroyBuffer(device, final_buffer, nil)
+		return {}, false
+	}
+
+	submit_info := vk.SubmitInfo {
+		sType              = .SUBMIT_INFO,
+		commandBufferCount = 1,
+		pCommandBuffers    = &copy_cmd,
+	}
+	if vk.QueueSubmit(queue, 1, &submit_info, vk.Fence(0)) != .SUCCESS {
+		free_copy_cmd = true
+		vk.FreeMemory(device, final_memory, nil)
+		vk.DestroyBuffer(device, final_buffer, nil)
+		return {}, false
+	}
+	if vk.QueueWaitIdle(queue) != .SUCCESS {
+		free_copy_cmd = true
+		vk.FreeMemory(device, final_memory, nil)
+		vk.DestroyBuffer(device, final_buffer, nil)
+		return {}, false
+	}
+
+	vk.FreeCommandBuffers(device, command_pool, 1, &copy_cmd)
+	free_copy_cmd = false
+
+	return Gpu_Buffer{
+		handle = final_buffer,
+		memory = final_memory,
+	}, true
 }
 
 // -----------------------------------------------------------------------
@@ -544,6 +801,10 @@ SwapchainContext :: struct {
 	image_views:  []vk.ImageView,
 	image_format: vk.Format,
 	extent:       vk.Extent2D,
+
+	depth_image:      vk.Image,
+	depth_image_view: vk.ImageView,
+	depth_memory:     vk.DeviceMemory,
 }
 
 surface_format_supports_usage :: proc(
@@ -575,9 +836,25 @@ Quad_Command :: struct {
 	color: vec4,
 }
 
+Mesh_Vertex :: struct {
+	pos:   vec3,
+	color: vec4,
+}
+
+Mesh_Command :: struct {
+	model: mat4,
+	color: vec4,
+}
+
+Mesh_Push_Constants :: struct {
+	mvp:   mat4,
+	color: vec4,
+}
+
 Frame_Commands :: struct {
 	clear_color: vec4,
 	quads:       [dynamic]Quad_Command,
+	meshes:      [dynamic]Mesh_Command,
 }
 
 // -----------------------------------------------------------------------
@@ -802,17 +1079,40 @@ create_swapchain_context :: proc(
 		created_image_views += 1
 	}
 
+	depth_image, depth_image_view, depth_memory, ok_depth := create_depth_image(
+		device,
+		physical_device,
+		swap_extent,
+	)
+	if !ok_depth {
+		for created_index in 0 ..< created_image_views {
+			vk.DestroyImageView(device, swapchain_image_views[created_index], nil)
+		}
+		vk.DestroySwapchainKHR(device, swapchain, nil)
+		return {}, false
+	}
+
 	swapchain_context := SwapchainContext {
 		handle       = swapchain,
 		images       = swapchain_images,
 		image_views  = swapchain_image_views,
 		image_format = chosen_format.format,
 		extent       = swap_extent,
+		depth_image      = depth_image,
+		depth_image_view = depth_image_view,
+		depth_memory     = depth_memory,
 	}
 	return swapchain_context, true
 }
 
 destroy_swapchain_context :: proc(device: vk.Device, swapchain_context: ^SwapchainContext) {
+	destroy_depth_image(
+		device,
+		swapchain_context.depth_image,
+		swapchain_context.depth_image_view,
+		swapchain_context.depth_memory,
+	)
+
 	if len(swapchain_context.image_views) > 0 {
 		for image_view in swapchain_context.image_views {
 			vk.DestroyImageView(device, image_view, nil)
@@ -945,12 +1245,21 @@ record_command_buffer :: proc(
 	cmd: vk.CommandBuffer,
 	swapchain_image: vk.Image,
 	image_view: vk.ImageView,
+	depth_image: vk.Image,
+	depth_image_view: vk.ImageView,
 	extent: vk.Extent2D,
 	pipeline: vk.Pipeline,
 	layout: vk.PipelineLayout,
+	mesh_pipeline: vk.Pipeline,
+	mesh_layout: vk.PipelineLayout,
+	cube_vbuf: Gpu_Buffer,
+	cube_ibuf: Gpu_Buffer,
 	descriptor_set: vk.DescriptorSet,
 	clear_color: vec4,
 	quad_count: int,
+	mesh_commands: []Mesh_Command,
+	view_matrix: mat4,
+	proj_matrix: mat4,
 ) -> bool {
 	cmd_begin_info := vk.CommandBufferBeginInfo {
 		sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -981,6 +1290,25 @@ record_command_buffer :: proc(
 
 	vkCmdPipelineBarrier2(cmd, &dependency_info)
 
+	depth_barrier := vk.ImageMemoryBarrier2 {
+		sType            = .IMAGE_MEMORY_BARRIER_2,
+		srcStageMask     = {.TOP_OF_PIPE},
+		srcAccessMask    = {},
+		dstStageMask     = {.EARLY_FRAGMENT_TESTS},
+		dstAccessMask    = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+		oldLayout        = .UNDEFINED,
+		newLayout        = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		image            = depth_image,
+		subresourceRange = {{.DEPTH}, 0, 1, 0, 1},
+	}
+
+	depth_dependency := vk.DependencyInfo {
+		sType                   = .DEPENDENCY_INFO,
+		imageMemoryBarrierCount = 1,
+		pImageMemoryBarriers    = &depth_barrier,
+	}
+	vkCmdPipelineBarrier2(cmd, &depth_dependency)
+
 	clear := clear_color
 	clear_value := vk.ClearValue {
 		color = vk.ClearColorValue{float32 = {clear[0], clear[1], clear[2], clear[3]}},
@@ -996,6 +1324,18 @@ record_command_buffer :: proc(
 		clearValue  = clear_value,
 	}
 
+	depth_clear_value := vk.ClearValue {
+		depthStencil = {depth = 1.0, stencil = 0},
+	}
+	depth_attachment := vk.RenderingAttachmentInfo {
+		sType       = .RENDERING_ATTACHMENT_INFO,
+		imageView   = depth_image_view,
+		imageLayout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		loadOp      = .CLEAR,
+		storeOp     = .DONT_CARE,
+		clearValue  = depth_clear_value,
+	}
+
 	// Begin dynamic rendering
 	render_info := vk.RenderingInfo {
 		sType                = .RENDERING_INFO,
@@ -1003,6 +1343,7 @@ record_command_buffer :: proc(
 		layerCount           = 1,
 		colorAttachmentCount = 1,
 		pColorAttachments    = &color_attachment,
+		pDepthAttachment     = &depth_attachment,
 	}
 
 	vkCmdBeginRendering(cmd, &render_info)
@@ -1020,6 +1361,32 @@ record_command_buffer :: proc(
 
 	if quad_count > 0 {
 		vk.CmdDraw(cmd, 6, u32(quad_count), 0, 0)
+	}
+
+	if len(mesh_commands) > 0 {
+		vk.CmdBindPipeline(cmd, .GRAPHICS, mesh_pipeline)
+
+		vbuf := cube_vbuf.handle
+		vbuf_offset: vk.DeviceSize = 0
+		vk.CmdBindVertexBuffers(cmd, 0, 1, &vbuf, &vbuf_offset)
+		vk.CmdBindIndexBuffer(cmd, cube_ibuf.handle, 0, .UINT16)
+
+		for mesh_cmd in mesh_commands {
+			mvp := proj_matrix * view_matrix * mesh_cmd.model
+			push := Mesh_Push_Constants {
+				mvp   = mvp,
+				color = mesh_cmd.color,
+			}
+			vk.CmdPushConstants(
+				cmd,
+				mesh_layout,
+				{.VERTEX, .FRAGMENT},
+				0,
+				u32(size_of(Mesh_Push_Constants)),
+				&push,
+			)
+			vk.CmdDrawIndexed(cmd, 36, 1, 0, 0, 0)
+		}
 	}
 
 	vkCmdEndRendering(cmd)
@@ -1224,6 +1591,160 @@ create_graphics_pipeline :: proc(
 	return pipeline_layout, graphics_pipeline, true
 }
 
+create_mesh_pipeline :: proc(
+	device: vk.Device,
+	image_format: vk.Format,
+	depth_format: vk.Format,
+	shader_stages: []vk.PipelineShaderStageCreateInfo,
+	descriptor_layout: vk.DescriptorSetLayout,
+) -> (
+	vk.PipelineLayout,
+	vk.Pipeline,
+	bool,
+) {
+	vertex_binding := vk.VertexInputBindingDescription {
+		binding   = 0,
+		stride    = size_of(Mesh_Vertex),
+		inputRate = .VERTEX,
+	}
+	vertex_attributes := [2]vk.VertexInputAttributeDescription{
+		{
+			location = 0,
+			binding  = 0,
+			format   = .R32G32B32_SFLOAT,
+			offset   = 0,
+		},
+		{
+			location = 1,
+			binding  = 0,
+			format   = .R32G32B32A32_SFLOAT,
+			offset   = size_of(vec3),
+		},
+	}
+
+	vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
+		sType                           = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+		vertexBindingDescriptionCount   = 1,
+		pVertexBindingDescriptions      = &vertex_binding,
+		vertexAttributeDescriptionCount = u32(len(vertex_attributes)),
+		pVertexAttributeDescriptions    = &vertex_attributes[0],
+	}
+
+	input_assembly := vk.PipelineInputAssemblyStateCreateInfo {
+		sType                  = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+		topology               = .TRIANGLE_LIST,
+		primitiveRestartEnable = false,
+	}
+
+	viewport_state := vk.PipelineViewportStateCreateInfo {
+		sType         = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+		viewportCount = 1,
+		scissorCount  = 1,
+	}
+
+	dynamic_states := [2]vk.DynamicState{.VIEWPORT, .SCISSOR}
+	dynamic_state := vk.PipelineDynamicStateCreateInfo {
+		sType             = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+		dynamicStateCount = u32(len(dynamic_states)),
+		pDynamicStates    = raw_data(&dynamic_states),
+	}
+
+	rasterizer := vk.PipelineRasterizationStateCreateInfo {
+		sType                   = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+		depthClampEnable        = false,
+		rasterizerDiscardEnable = false,
+		polygonMode             = .FILL,
+		cullMode                = {.BACK},
+		frontFace               = .COUNTER_CLOCKWISE,
+		depthBiasEnable         = false,
+		lineWidth               = 1.0,
+	}
+
+	multisampling := vk.PipelineMultisampleStateCreateInfo {
+		sType                = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+		rasterizationSamples = {._1},
+		sampleShadingEnable  = false,
+	}
+
+	depth_stencil := vk.PipelineDepthStencilStateCreateInfo {
+		sType            = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		depthTestEnable  = true,
+		depthWriteEnable = true,
+		depthCompareOp   = .LESS,
+	}
+
+	colorblend_attachment := vk.PipelineColorBlendAttachmentState {
+		blendEnable    = false,
+		colorWriteMask = {.R, .G, .B, .A},
+	}
+	color_blending := vk.PipelineColorBlendStateCreateInfo {
+		sType           = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		logicOpEnable   = false,
+		attachmentCount = 1,
+		pAttachments    = &colorblend_attachment,
+	}
+
+	push_constant_range := vk.PushConstantRange {
+		stageFlags = {.VERTEX, .FRAGMENT},
+		offset     = 0,
+		size       = u32(size_of(Mesh_Push_Constants)),
+	}
+
+	dl := descriptor_layout
+	pipeline_layout_info := vk.PipelineLayoutCreateInfo {
+		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
+		setLayoutCount         = 1,
+		pSetLayouts            = &dl,
+		pushConstantRangeCount = 1,
+		pPushConstantRanges    = &push_constant_range,
+	}
+
+	pipeline_layout: vk.PipelineLayout
+	if vk.CreatePipelineLayout(device, &pipeline_layout_info, nil, &pipeline_layout) != .SUCCESS {
+		return {}, {}, false
+	}
+
+	color_attachment_format := image_format
+	rendering_info := vk.PipelineRenderingCreateInfo {
+		sType                   = .PIPELINE_RENDERING_CREATE_INFO,
+		colorAttachmentCount    = 1,
+		pColorAttachmentFormats = &color_attachment_format,
+		depthAttachmentFormat   = depth_format,
+	}
+
+	pipeline_info := vk.GraphicsPipelineCreateInfo {
+		sType               = .GRAPHICS_PIPELINE_CREATE_INFO,
+		pNext               = &rendering_info,
+		stageCount          = u32(len(shader_stages)),
+		pStages             = raw_data(shader_stages),
+		pVertexInputState   = &vertex_input_info,
+		pInputAssemblyState = &input_assembly,
+		pViewportState      = &viewport_state,
+		pRasterizationState = &rasterizer,
+		pMultisampleState   = &multisampling,
+		pDepthStencilState  = &depth_stencil,
+		pColorBlendState    = &color_blending,
+		pDynamicState       = &dynamic_state,
+		layout              = pipeline_layout,
+	}
+
+	graphics_pipeline: vk.Pipeline
+	if vk.CreateGraphicsPipelines(
+		   device,
+		   vk.PipelineCache(0),
+		   1,
+		   &pipeline_info,
+		   nil,
+		   &graphics_pipeline,
+	   ) !=
+	   .SUCCESS {
+		vk.DestroyPipelineLayout(device, pipeline_layout, nil)
+		return {}, {}, false
+	}
+
+	return pipeline_layout, graphics_pipeline, true
+}
+
 recreate_swapchain_and_pipeline :: proc(
 	window: glfw.WindowHandle,
 	device: vk.Device,
@@ -1235,6 +1756,9 @@ recreate_swapchain_and_pipeline :: proc(
 	shader_stages: []vk.PipelineShaderStageCreateInfo,
 	pipeline_layout: ^vk.PipelineLayout,
 	graphics_pipeline: ^vk.Pipeline,
+	mesh_shader_stages: []vk.PipelineShaderStageCreateInfo,
+	mesh_pipeline_layout: ^vk.PipelineLayout,
+	mesh_pipeline: ^vk.Pipeline,
 	descriptor_layout: vk.DescriptorSetLayout,
 ) -> bool {
 	if !wait_for_non_zero_framebuffer(window) {
@@ -1262,11 +1786,28 @@ recreate_swapchain_and_pipeline :: proc(
 		return false
 	}
 
+	new_mesh_pipeline_layout, new_mesh_pipeline, ok_mesh_pipeline := create_mesh_pipeline(
+		device,
+		swapchain_context.image_format,
+		.D32_SFLOAT,
+		mesh_shader_stages,
+		descriptor_layout,
+	)
+	if !ok_mesh_pipeline {
+		vk.DestroyPipeline(device, new_graphics_pipeline, nil)
+		vk.DestroyPipelineLayout(device, new_pipeline_layout, nil)
+		return false
+	}
+
 	vk.DestroyPipeline(device, graphics_pipeline^, nil)
 	vk.DestroyPipelineLayout(device, pipeline_layout^, nil)
+	vk.DestroyPipeline(device, mesh_pipeline^, nil)
+	vk.DestroyPipelineLayout(device, mesh_pipeline_layout^, nil)
 
 	graphics_pipeline^ = new_graphics_pipeline
 	pipeline_layout^ = new_pipeline_layout
+	mesh_pipeline^ = new_mesh_pipeline
+	mesh_pipeline_layout^ = new_mesh_pipeline_layout
 
 	return true
 }

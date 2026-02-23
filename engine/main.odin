@@ -3,6 +3,7 @@ package engine
 import "core:fmt"
 import "core:mem"
 import "core:os"
+import "core:math/linalg"
 import "core:thread"
 import glfw "vendor:glfw"
 import vk "vendor:vulkan"
@@ -13,9 +14,11 @@ import shared "../shared"
 // -----------------------------------------------------------------------
 
 App_Callback_Context :: struct {
-	commands: ^Frame_Commands,
-	window:   glfw.WindowHandle,
-	dt:       f32,
+	commands:      ^Frame_Commands,
+	window:        glfw.WindowHandle,
+	dt:            f32,
+	camera_eye:    ^vec3,
+	camera_target: ^vec3,
 }
 
 @(private)
@@ -39,6 +42,26 @@ engine_set_clear_color :: proc(r, g, b, a: f32) {
 	app_callback_context.commands.clear_color = {r, g, b, a}
 }
 
+engine_set_camera :: proc(ex, ey, ez, tx, ty, tz: f32) {
+	if app_callback_context.camera_eye == nil || app_callback_context.camera_target == nil {
+		return
+	}
+
+	app_callback_context.camera_eye^ = {ex, ey, ez}
+	app_callback_context.camera_target^ = {tx, ty, tz}
+}
+
+engine_draw_cube :: proc(model: mat4, r, g, b, a: f32) {
+	if app_callback_context.commands == nil {
+		return
+	}
+
+	append(&app_callback_context.commands.meshes, Mesh_Command {
+		model = model,
+		color = {r, g, b, a},
+	})
+}
+
 engine_log :: proc(message: string) {
 	log_infof("[game] %s", message)
 }
@@ -59,6 +82,8 @@ make_engine_api :: proc() -> shared.Engine_API {
 		api_version     = shared.GAME_API_VERSION,
 		draw_quad       = engine_draw_quad,
 		set_clear_color = engine_set_clear_color,
+		set_camera      = engine_set_camera,
+		draw_cube       = engine_draw_cube,
 		log             = engine_log,
 		get_dt          = engine_get_dt,
 		is_key_down     = engine_is_key_down,
@@ -134,6 +159,15 @@ Engine :: struct {
 	shader_stages:     [2]vk.PipelineShaderStageCreateInfo,
 	pipeline_layout:   vk.PipelineLayout,
 	graphics_pipeline: vk.Pipeline,
+	mesh_vert_module:     vk.ShaderModule,
+	mesh_frag_module:     vk.ShaderModule,
+	mesh_shader_stages:   [2]vk.PipelineShaderStageCreateInfo,
+	mesh_pipeline_layout: vk.PipelineLayout,
+	mesh_pipeline:        vk.Pipeline,
+	cube_vbuf:            Gpu_Buffer,
+	cube_ibuf:            Gpu_Buffer,
+	camera_eye:           vec3,
+	camera_target:        vec3,
 
 	// Bindless resources
 	descriptor_layout: vk.DescriptorSetLayout,
@@ -301,8 +335,10 @@ create_swapchain :: proc(e: ^Engine) -> bool {
 load_shaders :: proc(e: ^Engine) -> bool {
 	vert_module, vert_stage, ok_vert := load_shader(e.gpu_context.device, "triangle.vert")
 	frag_module, frag_stage, ok_frag := load_shader(e.gpu_context.device, "triangle.frag")
+	mesh_vert_module, mesh_vert_stage, ok_mesh_vert := load_shader(e.gpu_context.device, "mesh.vert")
+	mesh_frag_module, mesh_frag_stage, ok_mesh_frag := load_shader(e.gpu_context.device, "mesh.frag")
 
-	if !ok_vert || !ok_frag {
+	if !ok_vert || !ok_frag || !ok_mesh_vert || !ok_mesh_frag {
 		log_error("Failed to load shader modules")
 		return false
 	}
@@ -310,6 +346,9 @@ load_shaders :: proc(e: ^Engine) -> bool {
 	e.vert_module = vert_module
 	e.frag_module = frag_module
 	e.shader_stages = {vert_stage, frag_stage}
+	e.mesh_vert_module = mesh_vert_module
+	e.mesh_frag_module = mesh_frag_module
+	e.mesh_shader_stages = {mesh_vert_stage, mesh_frag_stage}
 	return true
 }
 
@@ -396,6 +435,86 @@ create_pipeline :: proc(e: ^Engine) -> bool {
 
 	e.pipeline_layout = layout
 	e.graphics_pipeline = pipeline
+	return true
+}
+
+create_mesh_resources :: proc(e: ^Engine) -> bool {
+	mesh_layout, mesh_pipeline, ok_mesh_pipeline := create_mesh_pipeline(
+		e.gpu_context.device,
+		e.swapchain_context.image_format,
+		.D32_SFLOAT,
+		e.mesh_shader_stages[:],
+		e.descriptor_layout,
+	)
+	if !ok_mesh_pipeline {
+		log_error("Failed to create mesh pipeline")
+		return false
+	}
+	e.mesh_pipeline_layout = mesh_layout
+	e.mesh_pipeline = mesh_pipeline
+
+	cube_vertices := [8]Mesh_Vertex{
+		{pos = {-0.5, -0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, -0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, -0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, -0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
+	}
+
+	cube_indices := [36]u16{
+		4, 5, 6, 4, 6, 7,
+		1, 0, 3, 1, 3, 2,
+		5, 1, 2, 5, 2, 6,
+		0, 4, 7, 0, 7, 3,
+		3, 6, 2, 3, 7, 6,
+		4, 1, 5, 4, 0, 1,
+	}
+
+	cube_vbuf, ok_cube_vbuf := create_device_local_buffer(
+		e.gpu_context.device,
+		e.physical_device,
+		e.frames[0].command_pools[0],
+		e.gpu_context.graphics_queue,
+		raw_data(cube_vertices[:]),
+		vk.DeviceSize(size_of(cube_vertices)),
+		{.VERTEX_BUFFER},
+	)
+	if !ok_cube_vbuf {
+		log_error("Failed to create cube vertex buffer")
+		vk.DestroyPipeline(e.gpu_context.device, e.mesh_pipeline, nil)
+		vk.DestroyPipelineLayout(e.gpu_context.device, e.mesh_pipeline_layout, nil)
+		e.mesh_pipeline = 0
+		e.mesh_pipeline_layout = 0
+		return false
+	}
+	e.cube_vbuf = cube_vbuf
+
+	cube_ibuf, ok_cube_ibuf := create_device_local_buffer(
+		e.gpu_context.device,
+		e.physical_device,
+		e.frames[0].command_pools[0],
+		e.gpu_context.graphics_queue,
+		raw_data(cube_indices[:]),
+		vk.DeviceSize(size_of(cube_indices)),
+		{.INDEX_BUFFER},
+	)
+	if !ok_cube_ibuf {
+		log_error("Failed to create cube index buffer")
+		destroy_gpu_buffer(e.gpu_context.device, &e.cube_vbuf)
+		vk.DestroyPipeline(e.gpu_context.device, e.mesh_pipeline, nil)
+		vk.DestroyPipelineLayout(e.gpu_context.device, e.mesh_pipeline_layout, nil)
+		e.mesh_pipeline = 0
+		e.mesh_pipeline_layout = 0
+		return false
+	}
+	e.cube_ibuf = cube_ibuf
+
+	e.camera_eye = {0, 3, 6}
+	e.camera_target = {0, 0, 0}
+
 	return true
 }
 
@@ -528,13 +647,17 @@ init :: proc(e: ^Engine) -> bool {
 	if !create_pipeline_descriptor_layout(e) do return false
 	if !create_pipeline(e) do return false
 	if !create_command_pools(e) do return false
+	if !create_mesh_resources(e) do return false
 	if !create_sync_objects(e) do return false
 	if !create_bindless_resources(e) do return false
 
 	e.frame_commands = Frame_Commands {
 		clear_color = {0.0, 0.0, 0.0, 1.0},
 		quads       = make([dynamic]Quad_Command, context.allocator),
+		meshes      = make([dynamic]Mesh_Command, context.allocator),
 	}
+	app_callback_context.camera_eye = &e.camera_eye
+	app_callback_context.camera_target = &e.camera_target
 
 	return true
 }
@@ -548,6 +671,7 @@ cleanup :: proc(e: ^Engine) {
 	}
 
 	delete(e.frame_commands.quads)
+	delete(e.frame_commands.meshes)
 
 	if e.gpu_context.device != nil {
 		destroy_render_finished_semaphores(e)
@@ -555,6 +679,8 @@ cleanup :: proc(e: ^Engine) {
 		for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
 			destroy_mapped_buffer(e.gpu_context.device, &e.frames[i].quad_ssbo)
 		}
+		destroy_gpu_buffer(e.gpu_context.device, &e.cube_vbuf)
+		destroy_gpu_buffer(e.gpu_context.device, &e.cube_ibuf)
 		if e.descriptor_pool != 0 {
 			vk.DestroyDescriptorPool(e.gpu_context.device, e.descriptor_pool, nil)
 		}
@@ -570,8 +696,12 @@ cleanup :: proc(e: ^Engine) {
 		}
 		vk.DestroyPipeline(e.gpu_context.device, e.graphics_pipeline, nil)
 		vk.DestroyPipelineLayout(e.gpu_context.device, e.pipeline_layout, nil)
+		vk.DestroyPipeline(e.gpu_context.device, e.mesh_pipeline, nil)
+		vk.DestroyPipelineLayout(e.gpu_context.device, e.mesh_pipeline_layout, nil)
 		vk.DestroyShaderModule(e.gpu_context.device, e.frag_module, nil)
 		vk.DestroyShaderModule(e.gpu_context.device, e.vert_module, nil)
+		vk.DestroyShaderModule(e.gpu_context.device, e.mesh_frag_module, nil)
+		vk.DestroyShaderModule(e.gpu_context.device, e.mesh_vert_module, nil)
 
 		destroy_swapchain_context(e.gpu_context.device, &e.swapchain_context)
 		swapchain_memory_reset(e.swapchain_allocator)
@@ -648,6 +778,7 @@ run_main_loop :: proc(e: ^Engine) {
 		if lane_idx() == 0 {
 			free_all(context.temp_allocator)
 			clear(&e.frame_commands.quads)
+			clear(&e.frame_commands.meshes)
 			glfw.PollEvents()
 
 			if glfw.WindowShouldClose(e.window) {
@@ -664,9 +795,11 @@ run_main_loop :: proc(e: ^Engine) {
 			e.prev_time = now
 
 			app_callback_context = App_Callback_Context {
-				commands = &e.frame_commands,
-				window   = e.window,
-				dt       = dt,
+				commands      = &e.frame_commands,
+				window        = e.window,
+				dt            = dt,
+				camera_eye    = &e.camera_eye,
+				camera_target = &e.camera_target,
 			}
 
 			// Hot-reload check
@@ -714,6 +847,7 @@ run_main_loop :: proc(e: ^Engine) {
 			}
 
 			quad_count := min(len(e.frame_commands.quads), MAX_QUADS)
+			mesh_commands := e.frame_commands.meshes[:]
 			frame := &e.frames[int(e.current_frame)]
 
 			// Wait for the previous use of this frame slot to finish
@@ -777,6 +911,9 @@ run_main_loop :: proc(e: ^Engine) {
 					e.shader_stages[:],
 					&e.pipeline_layout,
 					&e.graphics_pipeline,
+					e.mesh_shader_stages[:],
+					&e.mesh_pipeline_layout,
+					&e.mesh_pipeline,
 					e.descriptor_layout,
 				) {
 					if !glfw.WindowShouldClose(e.window) {
@@ -808,16 +945,32 @@ run_main_loop :: proc(e: ^Engine) {
 				return
 			}
 
+			aspect := f32(e.swapchain_context.extent.width) / f32(e.swapchain_context.extent.height)
+			proj := linalg.matrix4_perspective_f32(linalg.to_radians(f32(45)), aspect, 0.1, 100.0)
+			proj[1][1] *= -1
+			proj[2][2] = 0.5 * (proj[2][2] - 1.0)
+			proj[3][2] *= 0.5
+			view := linalg.matrix4_look_at_f32(e.camera_eye, e.camera_target, {0, 1, 0})
+
 			if !record_command_buffer(
 				frame.cmds[0],
 				e.swapchain_context.images[image_index],
 				e.swapchain_context.image_views[image_index],
+				e.swapchain_context.depth_image,
+				e.swapchain_context.depth_image_view,
 				e.swapchain_context.extent,
 				e.graphics_pipeline,
 				e.pipeline_layout,
+				e.mesh_pipeline,
+				e.mesh_pipeline_layout,
+				e.cube_vbuf,
+				e.cube_ibuf,
 				frame.descriptor_set,
 				e.frame_commands.clear_color,
 				quad_count,
+				mesh_commands,
+				view,
+				proj,
 			) {
 				log_error("Failed to record command buffer")
 				e.quit = true
@@ -885,6 +1038,9 @@ run_main_loop :: proc(e: ^Engine) {
 						e.shader_stages[:],
 						&e.pipeline_layout,
 						&e.graphics_pipeline,
+						e.mesh_shader_stages[:],
+						&e.mesh_pipeline_layout,
+						&e.mesh_pipeline,
 						e.descriptor_layout,
 					) {
 						if !glfw.WindowShouldClose(e.window) {
@@ -908,6 +1064,9 @@ run_main_loop :: proc(e: ^Engine) {
 					e.shader_stages[:],
 					&e.pipeline_layout,
 					&e.graphics_pipeline,
+					e.mesh_shader_stages[:],
+					&e.mesh_pipeline_layout,
+					&e.mesh_pipeline,
 					e.descriptor_layout,
 				) {
 					if !glfw.WindowShouldClose(e.window) {

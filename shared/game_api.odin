@@ -1,9 +1,11 @@
 package shared
 
-GAME_API_VERSION :: u32(1)
+GAME_API_VERSION :: u32(2)
 
 Engine_Draw_Quad_Proc :: proc(x, y, width, height: f32, r, g, b, a: f32)
 Engine_Set_Clear_Color_Proc :: proc(r, g, b, a: f32)
+Engine_Set_Camera_Proc :: proc(eye_x, eye_y, eye_z, tx, ty, tz: f32)
+Engine_Draw_Cube_Proc :: proc(model: mat4, r, g, b, a: f32)
 Engine_Log_Proc :: proc(message: string)
 Engine_Get_DT_Proc :: proc() -> f32
 Engine_Is_Key_Down_Proc :: proc(key: i32) -> bool
@@ -13,6 +15,8 @@ Engine_API :: struct {
 
 	draw_quad:       Engine_Draw_Quad_Proc,
 	set_clear_color: Engine_Set_Clear_Color_Proc,
+	set_camera:      Engine_Set_Camera_Proc,
+	draw_cube:       Engine_Draw_Cube_Proc,
 	log:             Engine_Log_Proc,
 	get_dt:          Engine_Get_DT_Proc,
 	is_key_down:     Engine_Is_Key_Down_Proc,
