@@ -1,6 +1,6 @@
 ---
 name: zii-pattern
-description: Zero Is Initialization pattern and nil sentinels for crash-free defaults. Use when designing struct defaults, error handling strategy, initialization patterns, or when the user asks about avoiding null checks, default values, or safe fallbacks.
+description: Zero Is Initialization pattern with nil sentinels for lookup safety and Odin multi-return values for fallible operations. Use when designing struct defaults, error handling strategy, initialization patterns, or when the user asks about avoiding null checks, default values, or safe fallbacks.
 ---
 
 # Zero Is Initialization (ZII) & Nil Sentinels
@@ -61,6 +61,18 @@ if entity.health > 0 {
 
 This eliminates entire categories of crashes and removes error-checking boilerplate from the game loop.
 
+## Odin Note: Prefer Multi-Return for Fallible Ops
+
+In Odin, prefer explicit multi-return results for operations that can fail due to external state (allocation, file I/O, Vulkan calls, init/setup paths):
+
+```odin
+create_buffer :: proc(...) -> (Buffer, bool)
+load_asset   :: proc(...) -> (^Asset, Load_Error)
+```
+
+Use nil/index-0 sentinels for lookups and hot-path gameplay access where "missing" is a normal state.
+Use multi-return for true failure paths where caller must branch.
+
 ## Arena Allocator Stubs
 
 If a bump allocator runs out of space, it can return a pointer to a global zero-stub rather than null. The caller writes to the stub harmlessly (the data is lost, but the game doesn't crash). This is appropriate for non-critical allocations like particle effects.
@@ -70,6 +82,7 @@ If a bump allocator runs out of space, it can return a pointer to a global zero-
 - Design every new struct so all-zero is a valid state
 - Never use index 0 for real entities — it's the nil sentinel
 - Never return null from entity/resource lookups — return the nil sentinel
+- In Odin, prefer `(value, ok)` or `(value, error)` returns for fallible setup/resource operations
 - Never write explicit null checks in game logic — rely on ZII defaults
 - When resetting state, prefer `mem.zero` or `mem.set` over field-by-field clearing
 - Enum values should have their zero value be "none" or "invalid"
@@ -79,5 +92,6 @@ If a bump allocator runs out of space, it can return a pointer to a global zero-
 - Never design a struct where zero means something active or important
 - Never return null/nil pointers from lookup functions
 - Never use try/catch or error codes for entity operations
+- Never force sentinel-only handling for true external/runtime failures in Odin
 - Never write `if entity != nil` before accessing entity properties
 - Never require an init() call before a struct is usable

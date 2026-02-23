@@ -648,17 +648,9 @@ run_main_loop :: proc(e: ^Engine) {
 				)
 			}
 
-			// Copy quad data to current frame SSBO
 			quad_count := min(len(e.frame_commands.quads), MAX_QUADS)
-			if quad_count > 0 {
-				mem.copy(
-					e.quad_ssbos[e.current_frame].mapped,
-					raw_data(e.frame_commands.quads),
-					quad_count * size_of(Quad_Command),
-				)
-			}
 
-			// Wait for the previous frame to finish
+			// Wait for the previous use of this frame slot to finish
 			wait_result := vk.WaitForFences(
 				e.gpu_context.device,
 				1,
@@ -681,6 +673,15 @@ run_main_loop :: proc(e: ^Engine) {
 				e.quit = true
 				lane_sync()
 				return
+			}
+
+			// Copy quad data to current frame SSBO after fence wait
+			if quad_count > 0 {
+				mem.copy(
+					e.quad_ssbos[e.current_frame].mapped,
+					raw_data(e.frame_commands.quads),
+					quad_count * size_of(Quad_Command),
+				)
 			}
 
 			// Acquire the next swapchain image

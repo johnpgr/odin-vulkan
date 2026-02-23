@@ -90,10 +90,18 @@ create_mapped_buffer :: proc(
 		return {}, false
 	}
 
-	vk.BindBufferMemory(device, buffer, memory, 0)
+	if vk.BindBufferMemory(device, buffer, memory, 0) != .SUCCESS {
+		vk.FreeMemory(device, memory, nil)
+		vk.DestroyBuffer(device, buffer, nil)
+		return {}, false
+	}
 
 	mapped: rawptr
-	vk.MapMemory(device, memory, 0, size, {}, &mapped)
+	if vk.MapMemory(device, memory, 0, size, {}, &mapped) != .SUCCESS {
+		vk.FreeMemory(device, memory, nil)
+		vk.DestroyBuffer(device, buffer, nil)
+		return {}, false
+	}
 
 	return Mapped_Buffer{handle = buffer, memory = memory, mapped = mapped, size = size}, true
 }

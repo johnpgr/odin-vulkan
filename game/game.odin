@@ -11,13 +11,11 @@ Game_State :: struct {
 	world: World,
 }
 
-@(private) nil_game_state: Game_State
-
-get_state :: proc(memory: rawptr, memory_size: int) -> ^Game_State {
+get_state :: proc(memory: rawptr, memory_size: int) -> (^Game_State, bool) {
 	if memory == nil || memory_size < size_of(Game_State) {
-		return &nil_game_state
+		return nil, false
 	}
-	return cast(^Game_State)memory
+	return cast(^Game_State)memory, true
 }
 
 @(export)
@@ -32,7 +30,11 @@ game_get_memory_size :: proc() -> int {
 
 @(export)
 game_load :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
-	state := get_state(memory, memory_size)
+	state, ok := get_state(memory, memory_size)
+	if !ok {
+		api.log("game_load: invalid state memory")
+		return
+	}
 
 	state^ = {}
 	api.log("game_load")
@@ -40,21 +42,35 @@ game_load :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
 
 @(export)
 game_unload :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
-	state := get_state(memory, memory_size)
+	state, ok := get_state(memory, memory_size)
+	if !ok {
+		api.log("game_unload: invalid state memory")
+		return
+	}
+
 	state.time = 0
 	api.log("game_unload")
 }
 
 @(export)
 game_reload :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
-	state := get_state(memory, memory_size)
+	state, ok := get_state(memory, memory_size)
+	if !ok {
+		api.log("game_reload: invalid state memory")
+		return
+	}
+
 	state.reload_count += 1
 	api.log("game_reload")
 }
 
 @(export)
 game_update :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
-	state := get_state(memory, memory_size)
+	state, ok := get_state(memory, memory_size)
+	if !ok {
+		api.log("game_update: invalid state memory")
+		return
+	}
 
 	dt := api.get_dt()
 	state.time += dt
