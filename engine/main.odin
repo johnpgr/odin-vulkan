@@ -17,24 +17,24 @@ App_Callback_Context :: struct {
 }
 
 @(private)
-_app_callback_context: App_Callback_Context
+app_callback_context: App_Callback_Context
 
 engine_draw_quad :: proc(x, y, width, height: f32, r, g, b, a: f32) {
-	if _app_callback_context.commands == nil {
+	if app_callback_context.commands == nil {
 		return
 	}
 
-	append(&_app_callback_context.commands.quads, Quad_Command {
+	append(&app_callback_context.commands.quads, Quad_Command {
 		rect  = {x, y, width, height},
 		color = {r, g, b, a},
 	})
 }
 
 engine_set_clear_color :: proc(r, g, b, a: f32) {
-	if _app_callback_context.commands == nil {
+	if app_callback_context.commands == nil {
 		return
 	}
-	_app_callback_context.commands.clear_color = {r, g, b, a}
+	app_callback_context.commands.clear_color = {r, g, b, a}
 }
 
 engine_log :: proc(message: string) {
@@ -42,14 +42,14 @@ engine_log :: proc(message: string) {
 }
 
 engine_get_dt :: proc() -> f32 {
-	return _app_callback_context.dt
+	return app_callback_context.dt
 }
 
 engine_is_key_down :: proc(key: i32) -> bool {
-	if _app_callback_context.window == nil {
+	if app_callback_context.window == nil {
 		return false
 	}
-	return glfw.GetKey(_app_callback_context.window, key) == glfw.PRESS
+	return glfw.GetKey(app_callback_context.window, key) == glfw.PRESS
 }
 
 make_engine_api :: proc() -> shared.Engine_API {
@@ -480,7 +480,7 @@ run_main_loop :: proc(e: ^Engine) {
 		}
 		prev_time = now
 
-		_app_callback_context = App_Callback_Context {
+		app_callback_context = App_Callback_Context {
 			commands = &e.frame_commands,
 			window   = e.window,
 			dt       = dt,
