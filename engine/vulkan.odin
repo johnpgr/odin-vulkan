@@ -392,10 +392,7 @@ create_gpu_context :: proc(
 
 	assert(vkCmdBeginRendering != nil, "Neither vkCmdBeginRendering nor vkCmdBeginRenderingKHR loaded")
 	assert(vkCmdEndRendering != nil, "Neither vkCmdEndRendering nor vkCmdEndRenderingKHR loaded")
-	assert(
-		vkCmdPipelineBarrier2 != nil,
-		"Neither vkCmdPipelineBarrier2 nor vkCmdPipelineBarrier2KHR loaded",
-	)
+	assert(vkCmdPipelineBarrier2 != nil, "Neither vkCmdPipelineBarrier2 nor vkCmdPipelineBarrier2KHR loaded")
 
 	graphics_queue, present_queue: vk.Queue
 	vk.GetDeviceQueue(device, queue_families.graphics_family, 0, &graphics_queue)

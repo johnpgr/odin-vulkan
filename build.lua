@@ -174,6 +174,35 @@ local function game_output_name()
     return "libgame.so"
 end
 
+local function timestamp_id()
+    local sec = os.time()
+    local micros = math.floor((os.clock() % 1) * 1000000)
+    return tostring(sec) .. string.format("%06d", micros)
+end
+
+local function cleanup_old_macos_dylibs(project_root)
+    local cleanup_game_cmd = "for f in bin/libgame.*.dylib; do [ -f \"$f\" ] || continue; rm -f \"$f\"; done"
+    local ok, err = execute_in_root(project_root, cleanup_game_cmd)
+    if not ok then
+        return false, err
+    end
+
+    local cleanup_game_dsym_cmd = "for f in bin/libgame.*.dylib.dSYM; do [ -d \"$f\" ] || continue; rm -rf \"$f\"; done"
+    ok, err = execute_in_root(project_root, cleanup_game_dsym_cmd)
+    if not ok then
+        return false, err
+    end
+
+    return true
+end
+
+local function replace_with_atomic_rename(project_root, src_rel, dst_rel)
+    return execute_in_root(
+        project_root,
+        "mv -f " .. shell_escape(src_rel) .. " " .. shell_escape(dst_rel)
+    )
+end
+
 local function build_engine(project_root)
     local cmd = {
         "odin",
@@ -214,20 +243,61 @@ local function build_engine(project_root)
 end
 
 local function build_game(project_root)
+    local output_name = game_output_name()
+    local timestamped_name = nil
+
+    if host_os == "macos" then
+        timestamped_name = "libgame." .. timestamp_id() .. ".dylib"
+        output_name = timestamped_name
+    end
+
     local cmd = {
         "odin",
         "build",
         "game",
         "-build-mode:dll",
         "-collection:app=.",
-        "-out:" .. joinpath("bin", game_output_name()),
+        "-out:" .. joinpath("bin", output_name),
     }
 
     if build_mode ~= "release" then
         cmd[#cmd + 1] = "-debug"
     end
 
-    return execute_in_root(project_root, command_to_string(cmd))
+    local ok, err = execute_in_root(project_root, command_to_string(cmd))
+    if not ok then
+        return false, err
+    end
+
+    if host_os ~= "macos" then
+        return true
+    end
+
+    local timestamped_rel = joinpath("bin", timestamped_name)
+    local canonical_rel = joinpath("bin", game_output_name())
+    local timestamped_dsym_rel = timestamped_rel .. ".dSYM"
+    local canonical_dsym_rel = canonical_rel .. ".dSYM"
+
+    ok, err = replace_with_atomic_rename(project_root, timestamped_rel, canonical_rel)
+    if not ok then
+        return false, "failed to refresh libgame.dylib from timestamped build (" .. tostring(err) .. ")"
+    end
+
+    ok, err = execute_in_root(
+        project_root,
+        "if [ -d " .. shell_escape(timestamped_dsym_rel) .. " ]; then rm -rf " .. shell_escape(canonical_dsym_rel) .. " && mv " .. shell_escape(timestamped_dsym_rel) .. " " .. shell_escape(canonical_dsym_rel) .. "; fi"
+    )
+    if not ok then
+        return false, "failed to refresh libgame.dylib.dSYM (" .. tostring(err) .. ")"
+    end
+
+    ok, err = cleanup_old_macos_dylibs(project_root)
+    if not ok then
+        return false, "failed to cleanup old dylibs (" .. tostring(err) .. ")"
+    end
+
+    log_verbose("game dylib refreshed: " .. canonical_rel)
+    return true
 end
 
 local function ensure_bin(project_root)

@@ -600,6 +600,7 @@ init_game :: proc(e: ^Engine) -> bool {
 	e.game_module = Game_Module {
 		dll_source_path = game_library_source_path(),
 		dll_loaded_path = game_library_loaded_path(),
+		loaded_generation = -1,
 	}
 
 	if !load_game_module(&e.game_module) {

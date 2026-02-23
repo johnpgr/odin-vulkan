@@ -1,5 +1,6 @@
 package engine
 
+import "core:fmt"
 import "core:dynlib"
 import "core:os"
 import shared "../shared"
@@ -7,11 +8,36 @@ import shared "../shared"
 Game_Module :: struct {
 	dll_source_path: string,
 	dll_loaded_path: string,
+	load_generation: u64,
+	loaded_generation: i64,
 
 	library: dynlib.Library,
 	last_write_time: os.File_Time,
 	api: shared.Game_API,
 	is_loaded: bool,
+}
+
+next_load_path :: proc(module: ^Game_Module) -> (string, u64) {
+	when ODIN_OS == .Darwin {
+		generation := module.load_generation
+		path := fmt.tprintf("%s.%d", module.dll_loaded_path, generation)
+		module.load_generation += 1
+		return path, generation
+	}
+
+	return module.dll_loaded_path, 0
+}
+
+remove_loaded_copy_file :: proc(module: ^Game_Module) {
+	when ODIN_OS == .Darwin {
+		if module.loaded_generation < 0 {
+			return
+		}
+
+		path := fmt.tprintf("%s.%d", module.dll_loaded_path, module.loaded_generation)
+		_ = os.remove(path)
+		module.loaded_generation = -1
+	}
 }
 
 game_symbol :: proc(module: ^Game_Module, symbol: string) -> rawptr {
@@ -84,17 +110,25 @@ bind_game_module_api :: proc(module: ^Game_Module) -> bool {
 }
 
 load_game_module_from_bytes :: proc(module: ^Game_Module, bytes: []byte) -> bool {
-	if !write_game_module_bytes(module.dll_loaded_path, bytes) {
+	load_path, load_generation := next_load_path(module)
+
+	if !write_game_module_bytes(load_path, bytes) {
 		return false
 	}
 
-	library, ok_library := dynlib.load_library(module.dll_loaded_path)
+	library, ok_library := dynlib.load_library(load_path)
 	if !ok_library {
-		log_errorf("Failed to load game library: %s", dynlib.last_error())
+		when ODIN_OS == .Darwin {
+			_ = os.remove(load_path)
+		}
+		log_errorf("Failed to load game library (%s): %s", load_path, dynlib.last_error())
 		return false
 	}
 
 	module.library = library
+	when ODIN_OS == .Darwin {
+		module.loaded_generation = i64(load_generation)
+	}
 
 	if !bind_game_module_api(module) {
 		unload_game_module(module)
@@ -126,6 +160,7 @@ unload_game_module :: proc(module: ^Game_Module) {
 	if module.is_loaded {
 		dynlib.unload_library(module.library)
 	}
+	remove_loaded_copy_file(module)
 	module.library = dynlib.Library(nil)
 	module.api = {}
 	module.is_loaded = false
