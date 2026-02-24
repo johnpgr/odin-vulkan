@@ -9,3 +9,4 @@ mat2 :: shared.mat2
 mat3 :: shared.mat3
 mat4 :: shared.mat4
 quat :: shared.quat
+Mesh_Handle :: shared.Mesh_Handle

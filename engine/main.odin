@@ -14,11 +14,11 @@ import shared "../shared"
 // -----------------------------------------------------------------------
 
 App_Callback_Context :: struct {
-	commands:      ^Frame_Commands,
-	window:        glfw.WindowHandle,
-	dt:            f32,
-	camera_eye:    ^vec3,
-	camera_target: ^vec3,
+	commands:        ^Frame_Commands,
+	window:          glfw.WindowHandle,
+	dt:              f32,
+	engine:          ^Engine,
+	allow_mesh_load: bool,
 }
 
 @(private)
@@ -43,23 +43,102 @@ engine_set_clear_color :: proc(r, g, b, a: f32) {
 }
 
 engine_set_camera :: proc(ex, ey, ez, tx, ty, tz: f32) {
-	if app_callback_context.camera_eye == nil || app_callback_context.camera_target == nil {
+	if app_callback_context.engine == nil {
 		return
 	}
 
-	app_callback_context.camera_eye^ = {ex, ey, ez}
-	app_callback_context.camera_target^ = {tx, ty, tz}
+	app_callback_context.engine.camera_eye = {ex, ey, ez}
+	app_callback_context.engine.camera_target = {tx, ty, tz}
 }
 
-engine_draw_cube :: proc(model: mat4, r, g, b, a: f32) {
+engine_load_mesh :: proc(path: cstring) -> shared.Mesh_Handle {
+	e := app_callback_context.engine
+	if e == nil {
+		return shared.CUBE_MESH
+	}
+
+	if !app_callback_context.allow_mesh_load {
+		log_warn("load_mesh is only allowed during game_load")
+		return shared.CUBE_MESH
+	}
+
+	if e.next_mesh_slot >= MAX_MESHES {
+		log_error("Mesh slots full")
+		return shared.CUBE_MESH
+	}
+
+	path_text := "<nil>"
+	if path != nil {
+		path_text = string(path)
+	} else {
+		log_error("load_mesh called with nil path")
+		return shared.CUBE_MESH
+	}
+
+	vertices, indices, ok := load_gltf_mesh(path)
+	if !ok || len(vertices) == 0 || len(indices) == 0 {
+		log_errorf("Failed to load mesh: %s", path_text)
+		return shared.CUBE_MESH
+	}
+
+	slot := e.next_mesh_slot
+	slot_index := int(slot)
+
+	vbuf, ok_vbuf := create_device_local_buffer(
+		e.gpu_context.device,
+		e.physical_device,
+		e.frames[0].command_pools[0],
+		e.gpu_context.graphics_queue,
+		raw_data(vertices),
+		vk.DeviceSize(len(vertices) * size_of(Mesh_Vertex)),
+		{.VERTEX_BUFFER},
+	)
+	if !ok_vbuf {
+		log_errorf("Failed to upload mesh vertex buffer: %s", path_text)
+		return shared.CUBE_MESH
+	}
+
+	ibuf, ok_ibuf := create_device_local_buffer(
+		e.gpu_context.device,
+		e.physical_device,
+		e.frames[0].command_pools[0],
+		e.gpu_context.graphics_queue,
+		raw_data(indices),
+		vk.DeviceSize(len(indices) * size_of(u32)),
+		{.INDEX_BUFFER},
+	)
+	if !ok_ibuf {
+		destroy_gpu_buffer(e.gpu_context.device, &vbuf)
+		log_errorf("Failed to upload mesh index buffer: %s", path_text)
+		return shared.CUBE_MESH
+	}
+
+	e.meshes[slot_index] = Gpu_Mesh {
+		vbuf         = vbuf,
+		ibuf         = ibuf,
+		index_count  = u32(len(indices)),
+		vertex_count = u32(len(vertices)),
+		loaded       = true,
+	}
+	e.next_mesh_slot += 1
+
+	return shared.Mesh_Handle(slot)
+}
+
+engine_draw_mesh :: proc(handle: shared.Mesh_Handle, model: mat4, r, g, b, a: f32) {
 	if app_callback_context.commands == nil {
 		return
 	}
 
 	append(&app_callback_context.commands.meshes, Mesh_Command {
+		mesh  = handle,
 		model = model,
 		color = {r, g, b, a},
 	})
+}
+
+engine_draw_cube :: proc(model: mat4, r, g, b, a: f32) {
+	engine_draw_mesh(shared.CUBE_MESH, model, r, g, b, a)
 }
 
 engine_log :: proc(message: string) {
@@ -83,6 +162,8 @@ make_engine_api :: proc() -> shared.Engine_API {
 		draw_quad       = engine_draw_quad,
 		set_clear_color = engine_set_clear_color,
 		set_camera      = engine_set_camera,
+		load_mesh       = engine_load_mesh,
+		draw_mesh       = engine_draw_mesh,
 		draw_cube       = engine_draw_cube,
 		log             = engine_log,
 		get_dt          = engine_get_dt,
@@ -164,8 +245,8 @@ Engine :: struct {
 	mesh_shader_stages:   [2]vk.PipelineShaderStageCreateInfo,
 	mesh_pipeline_layout: vk.PipelineLayout,
 	mesh_pipeline:        vk.Pipeline,
-	cube_vbuf:            Gpu_Buffer,
-	cube_ibuf:            Gpu_Buffer,
+	meshes:               [MAX_MESHES]Gpu_Mesh,
+	next_mesh_slot:       u32,
 	camera_eye:           vec3,
 	camera_target:        vec3,
 
@@ -456,24 +537,46 @@ create_mesh_resources :: proc(e: ^Engine) -> bool {
 	e.mesh_pipeline_layout = mesh_layout
 	e.mesh_pipeline = mesh_pipeline
 
-	cube_vertices := [8]Mesh_Vertex{
-		{pos = {-0.5, -0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {+0.5, -0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {+0.5, +0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {-0.5, +0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {-0.5, -0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {+0.5, -0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {+0.5, +0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {-0.5, +0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
+	cube_vertices := [24]Mesh_Vertex{
+		// Front (+Z)
+		{pos = {-0.5, -0.5, +0.5}, normal = {0, 0, 1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, -0.5, +0.5}, normal = {0, 0, 1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, +0.5}, normal = {0, 0, 1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, +0.5}, normal = {0, 0, 1}, color = {1.0, 1.0, 1.0, 1.0}},
+		// Back (-Z)
+		{pos = {+0.5, -0.5, -0.5}, normal = {0, 0, -1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, -0.5, -0.5}, normal = {0, 0, -1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, -0.5}, normal = {0, 0, -1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, -0.5}, normal = {0, 0, -1}, color = {1.0, 1.0, 1.0, 1.0}},
+		// Right (+X)
+		{pos = {+0.5, -0.5, +0.5}, normal = {1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, -0.5, -0.5}, normal = {1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, -0.5}, normal = {1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, +0.5}, normal = {1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		// Left (-X)
+		{pos = {-0.5, -0.5, -0.5}, normal = {-1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, -0.5, +0.5}, normal = {-1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, +0.5}, normal = {-1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, -0.5}, normal = {-1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		// Top (+Y)
+		{pos = {-0.5, +0.5, +0.5}, normal = {0, 1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, +0.5}, normal = {0, 1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, -0.5}, normal = {0, 1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, -0.5}, normal = {0, 1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		// Bottom (-Y)
+		{pos = {-0.5, -0.5, -0.5}, normal = {0, -1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, -0.5, -0.5}, normal = {0, -1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, -0.5, +0.5}, normal = {0, -1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, -0.5, +0.5}, normal = {0, -1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
 	}
 
-	cube_indices := [36]u16{
+	cube_indices := [36]u32{
+		0, 1, 2, 0, 2, 3,
 		4, 5, 6, 4, 6, 7,
-		1, 0, 3, 1, 3, 2,
-		5, 1, 2, 5, 2, 6,
-		0, 4, 7, 0, 7, 3,
-		3, 6, 2, 3, 7, 6,
-		4, 1, 5, 4, 0, 1,
+		8, 9, 10, 8, 10, 11,
+		12, 13, 14, 12, 14, 15,
+		16, 17, 18, 16, 18, 19,
+		20, 21, 22, 20, 22, 23,
 	}
 
 	cube_vbuf, ok_cube_vbuf := create_device_local_buffer(
@@ -493,7 +596,6 @@ create_mesh_resources :: proc(e: ^Engine) -> bool {
 		e.mesh_pipeline_layout = 0
 		return false
 	}
-	e.cube_vbuf = cube_vbuf
 
 	cube_ibuf, ok_cube_ibuf := create_device_local_buffer(
 		e.gpu_context.device,
@@ -506,14 +608,22 @@ create_mesh_resources :: proc(e: ^Engine) -> bool {
 	)
 	if !ok_cube_ibuf {
 		log_error("Failed to create cube index buffer")
-		destroy_gpu_buffer(e.gpu_context.device, &e.cube_vbuf)
+		destroy_gpu_buffer(e.gpu_context.device, &cube_vbuf)
 		vk.DestroyPipeline(e.gpu_context.device, e.mesh_pipeline, nil)
 		vk.DestroyPipelineLayout(e.gpu_context.device, e.mesh_pipeline_layout, nil)
 		e.mesh_pipeline = 0
 		e.mesh_pipeline_layout = 0
 		return false
 	}
-	e.cube_ibuf = cube_ibuf
+
+	e.meshes[int(cast(u32)shared.CUBE_MESH)] = Gpu_Mesh {
+		vbuf         = cube_vbuf,
+		ibuf         = cube_ibuf,
+		index_count  = u32(len(cube_indices)),
+		vertex_count = u32(len(cube_vertices)),
+		loaded       = true,
+	}
+	e.next_mesh_slot = 1
 
 	e.camera_eye = {0, 3, 6}
 	e.camera_target = {0, 0, 0}
@@ -659,8 +769,8 @@ init :: proc(e: ^Engine, headless: bool = false) -> bool {
 		quads       = make([dynamic]Quad_Command, context.allocator),
 		meshes      = make([dynamic]Mesh_Command, context.allocator),
 	}
-	app_callback_context.camera_eye = &e.camera_eye
-	app_callback_context.camera_target = &e.camera_target
+	app_callback_context.engine = e
+	app_callback_context.allow_mesh_load = false
 
 	return true
 }
@@ -682,8 +792,13 @@ cleanup :: proc(e: ^Engine) {
 		for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
 			destroy_mapped_buffer(e.gpu_context.device, &e.frames[i].quad_ssbo)
 		}
-		destroy_gpu_buffer(e.gpu_context.device, &e.cube_vbuf)
-		destroy_gpu_buffer(e.gpu_context.device, &e.cube_ibuf)
+		for i in 0 ..< MAX_MESHES {
+			if e.meshes[i].loaded {
+				destroy_gpu_buffer(e.gpu_context.device, &e.meshes[i].vbuf)
+				destroy_gpu_buffer(e.gpu_context.device, &e.meshes[i].ibuf)
+				e.meshes[i] = {}
+			}
+		}
 		if e.descriptor_pool != 0 {
 			vk.DestroyDescriptorPool(e.gpu_context.device, e.descriptor_pool, nil)
 		}
@@ -748,7 +863,13 @@ init_game :: proc(e: ^Engine) -> bool {
 	}
 
 	e.game_memory = make([]byte, game_memory_size, context.allocator)
+	app_callback_context = App_Callback_Context {
+		engine          = e,
+		window          = e.window,
+		allow_mesh_load = true,
+	}
 	e.game_module.api.load(&e.engine_api, raw_data(e.game_memory), len(e.game_memory))
+	app_callback_context.allow_mesh_load = false
 	return true
 }
 
@@ -798,11 +919,11 @@ run_main_loop :: proc(e: ^Engine) {
 			e.prev_time = now
 
 			app_callback_context = App_Callback_Context {
-				commands      = &e.frame_commands,
-				window        = e.window,
-				dt            = dt,
-				camera_eye    = &e.camera_eye,
-				camera_target = &e.camera_target,
+				commands        = &e.frame_commands,
+				window          = e.window,
+				dt              = dt,
+				engine          = e,
+				allow_mesh_load = false,
 			}
 
 			// Hot-reload check
@@ -966,8 +1087,7 @@ run_main_loop :: proc(e: ^Engine) {
 				e.pipeline_layout,
 				e.mesh_pipeline,
 				e.mesh_pipeline_layout,
-				e.cube_vbuf,
-				e.cube_ibuf,
+				&e.meshes,
 				frame.descriptor_set,
 				e.frame_commands.clear_color,
 				quad_count,
