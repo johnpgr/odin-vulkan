@@ -1401,7 +1401,19 @@ run_headless_loop :: proc(e: ^Engine, config: Frame_Export_Config) {
 			pSwapchains        = &e.swapchain_context.handle,
 			pImageIndices      = &image_index,
 		}
-		vk.QueuePresentKHR(e.gpu_context.present_queue, &present_info)
+		present_result := vk.QueuePresentKHR(e.gpu_context.present_queue, &present_info)
+		#partial switch present_result {
+		case .SUCCESS:
+		case .SUBOPTIMAL_KHR, .ERROR_OUT_OF_DATE_KHR:
+			log_errorf("Headless: QueuePresentKHR requires swapchain recreate: %v", present_result)
+			return
+		case .ERROR_DEVICE_LOST:
+			log_error("Headless: Device lost in QueuePresentKHR")
+			return
+		case:
+			log_errorf("Headless: QueuePresentKHR failed: %v", present_result)
+			return
+		}
 
 		e.current_frame = (e.current_frame + 1) % MAX_FRAMES_IN_FLIGHT
 		log_infof("Headless: wrote frame %d/%d", frame_num + 1, config.num_frames)
