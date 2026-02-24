@@ -87,11 +87,11 @@ game_update :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
 	api.draw_cube(cube_model, 0.8, 0.4, 0.2, 1.0)
 
 	tree_model := linalg.matrix4_translate_f32({3, 0, 0})
-	api.draw_mesh(state.tree_mesh, tree_model, 0.3, 0.7, 0.2, 1.0)
+	api.draw_mesh_raw_material(state.tree_mesh, tree_model)
 
 	for i in 0 ..< 3 {
 		pos := vec3{f32(i) * 2 - 2, 0, -3}
 		rock_model := linalg.matrix4_translate_f32(pos)
-		api.draw_mesh(state.rock_mesh, rock_model, 0.6, 0.6, 0.6, 1.0)
+		api.draw_mesh_blend(state.rock_mesh, rock_model, 0.6, 0.6, 0.6, 1.0, 0.7)
 	}
 }

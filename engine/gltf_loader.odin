@@ -80,6 +80,18 @@ load_gltf_mesh :: proc(
 			continue
 		}
 
+		material_r: f32 = 1
+		material_g: f32 = 1
+		material_b: f32 = 1
+		material_a: f32 = 1
+		if prim.material != nil && prim.material.has_pbr_metallic_roughness {
+			factor := prim.material.pbr_metallic_roughness.base_color_factor
+			material_r = factor[0]
+			material_g = factor[1]
+			material_b = factor[2]
+			material_a = factor[3]
+		}
+
 		position_acc: ^cgltf.accessor
 		normal_acc: ^cgltf.accessor
 		color_acc: ^cgltf.accessor
@@ -168,6 +180,11 @@ load_gltf_mesh :: proc(
 					ca = colors[base_color + 3]
 				}
 			}
+
+			cr *= material_r
+			cg *= material_g
+			cb *= material_b
+			ca *= material_a
 
 			vertices[dst_index] = Mesh_Vertex {
 				pos    = {positions[base_pos + 0], positions[base_pos + 1], positions[base_pos + 2]},

@@ -126,15 +126,31 @@ engine_load_mesh :: proc(path: cstring) -> shared.Mesh_Handle {
 }
 
 engine_draw_mesh :: proc(handle: shared.Mesh_Handle, model: mat4, r, g, b, a: f32) {
+	engine_draw_mesh_blend(handle, model, r, g, b, a, 1.0)
+}
+
+engine_draw_mesh_blend :: proc(handle: shared.Mesh_Handle, model: mat4, r, g, b, a, tint_strength: f32) {
 	if app_callback_context.commands == nil {
 		return
 	}
 
+	strength := tint_strength
+	if strength < 0 {
+		strength = 0
+	} else if strength > 1 {
+		strength = 1
+	}
+
 	append(&app_callback_context.commands.meshes, Mesh_Command {
-		mesh  = handle,
-		model = model,
-		color = {r, g, b, a},
+		mesh          = handle,
+		model         = model,
+		color         = {r, g, b, a},
+		tint_strength = strength,
 	})
+}
+
+engine_draw_mesh_raw_material :: proc(handle: shared.Mesh_Handle, model: mat4) {
+	engine_draw_mesh_blend(handle, model, 1.0, 1.0, 1.0, 1.0, 0.0)
 }
 
 engine_draw_cube :: proc(model: mat4, r, g, b, a: f32) {
@@ -164,6 +180,8 @@ make_engine_api :: proc() -> shared.Engine_API {
 		set_camera      = engine_set_camera,
 		load_mesh       = engine_load_mesh,
 		draw_mesh       = engine_draw_mesh,
+		draw_mesh_blend = engine_draw_mesh_blend,
+		draw_mesh_raw_material = engine_draw_mesh_raw_material,
 		draw_cube       = engine_draw_cube,
 		log             = engine_log,
 		get_dt          = engine_get_dt,

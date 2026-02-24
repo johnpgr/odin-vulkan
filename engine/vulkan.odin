@@ -845,14 +845,16 @@ Mesh_Vertex :: struct {
 }
 
 Mesh_Command :: struct {
-	mesh:  Mesh_Handle,
-	model: mat4,
-	color: vec4,
+	mesh:          Mesh_Handle,
+	model:         mat4,
+	color:         vec4,
+	tint_strength: f32,
 }
 
 Mesh_Push_Constants :: struct {
-	mvp:   mat4,
-	color: vec4,
+	mvp:        mat4,
+	color:      vec4,
+	tint_param: vec4,
 }
 
 Gpu_Mesh :: struct {
@@ -1407,8 +1409,9 @@ record_command_buffer :: proc(
 
 			mvp := proj_matrix * view_matrix * mesh_cmd.model
 			push := Mesh_Push_Constants {
-				mvp   = mvp,
-				color = mesh_cmd.color,
+				mvp        = mvp,
+				color      = mesh_cmd.color,
+				tint_param = {mesh_cmd.tint_strength, 0, 0, 0},
 			}
 			vk.CmdPushConstants(
 				cmd,
