@@ -26,7 +26,7 @@ Cmd_Pipeline_Barrier2_Proc :: #type type_of(vk.CmdPipelineBarrier2)
 Cmd_Begin_Rendering_Proc :: #type type_of(vk.CmdBeginRendering)
 Cmd_End_Rendering_Proc :: #type type_of(vk.CmdEndRendering)
 
-@(private)
+@(private = "package")
 vkCmdPipelineBarrier2: Cmd_Pipeline_Barrier2_Proc
 
 @(private)
@@ -927,11 +927,11 @@ create_swapchain_context :: proc(
 	}
 
 	image_usage := vk.ImageUsageFlags{.COLOR_ATTACHMENT}
+	if .TRANSFER_SRC in capabilities.supportedUsageFlags {
+		image_usage += {.TRANSFER_SRC}
+	}
 
 	validation_usage := image_usage
-	if .TRANSFER_SRC in capabilities.supportedUsageFlags {
-		validation_usage += {.TRANSFER_SRC}
-	}
 	if .STORAGE in capabilities.supportedUsageFlags {
 		validation_usage += {.STORAGE}
 	}

@@ -193,7 +193,7 @@ Engine :: struct {
 // Vulkan init steps (mirrors Vulkan Tutorial's initVulkan pattern)
 // -----------------------------------------------------------------------
 
-init_window :: proc(e: ^Engine) -> bool {
+init_window :: proc(e: ^Engine, headless: bool = false) -> bool {
 	if !glfw.Init() {
 		log_error("glfwInit failed")
 		return false
@@ -208,6 +208,9 @@ init_window :: proc(e: ^Engine) -> bool {
 
 	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
 	glfw.WindowHint(glfw.RESIZABLE, glfw.TRUE)
+	if headless {
+		glfw.WindowHint(glfw.VISIBLE, glfw.FALSE)
+	}
 	e.window = glfw.CreateWindow(1280, 720, "Learning Vulkan", nil, nil)
 	if e.window == nil {
 		log_error("Failed to create a window")
@@ -636,8 +639,8 @@ create_sync_objects :: proc(e: ^Engine) -> bool {
 
 // init initialises the window and every Vulkan object the engine
 // needs, in the same sequential order as the Vulkan Tutorial's initVulkan().
-init :: proc(e: ^Engine) -> bool {
-	if !init_window(e) do return false
+init :: proc(e: ^Engine, headless: bool = false) -> bool {
+	if !init_window(e, headless) do return false
 	if !create_instance(e) do return false
 	if !create_surface(e) do return false
 	if !pick_device(e) do return false
@@ -1101,6 +1104,194 @@ run_main_loop :: proc(e: ^Engine) {
 }
 
 // -----------------------------------------------------------------------
+// Headless frame capture loop (single-threaded, no input)
+// -----------------------------------------------------------------------
+
+run_headless_loop :: proc(e: ^Engine, config: Frame_Export_Config) {
+	log_infof(
+		"Headless: capturing %d frame(s) to %s/",
+		config.num_frames,
+		config.output_dir,
+	)
+
+	os.make_directory(config.output_dir)
+
+	export_res, ok_export := create_frame_export_resources(
+		e.gpu_context.device,
+		e.physical_device,
+		e.frames[0].command_pools[0],
+		e.swapchain_context.extent,
+	)
+	if !ok_export {
+		log_error("Failed to create frame export resources")
+		return
+	}
+	defer destroy_frame_export_resources(e.gpu_context.device, &export_res)
+
+	simulated_dt: f32 = 1.0 / 60.0
+
+	for frame_num in 0 ..< config.num_frames {
+		free_all(context.temp_allocator)
+		clear(&e.frame_commands.quads)
+		clear(&e.frame_commands.meshes)
+
+		app_callback_context = App_Callback_Context {
+			commands      = &e.frame_commands,
+			window        = e.window,
+			dt            = simulated_dt,
+			camera_eye    = &e.camera_eye,
+			camera_target = &e.camera_target,
+		}
+
+		if e.game_module.is_loaded {
+			e.game_module.api.update(
+				&e.engine_api,
+				raw_data(e.game_memory),
+				len(e.game_memory),
+			)
+		}
+
+		quad_count := min(len(e.frame_commands.quads), MAX_QUADS)
+		mesh_commands := e.frame_commands.meshes[:]
+		frame := &e.frames[int(e.current_frame)]
+
+		// Wait for previous use of this frame slot
+		vk.WaitForFences(e.gpu_context.device, 1, &frame.in_flight_fence, true, ~u64(0))
+
+		if quad_count > 0 {
+			mem.copy(
+				frame.quad_ssbo.mapped,
+				raw_data(e.frame_commands.quads),
+				quad_count * size_of(Quad_Command),
+			)
+		}
+
+		// Acquire swapchain image
+		image_index: u32
+		acquire_result := vk.AcquireNextImageKHR(
+			e.gpu_context.device,
+			e.swapchain_context.handle,
+			~u64(0),
+			frame.image_available_semaphore,
+			vk.Fence(0),
+			&image_index,
+		)
+		if acquire_result != .SUCCESS && acquire_result != .SUBOPTIMAL_KHR {
+			log_errorf("Headless: AcquireNextImageKHR failed: %v", acquire_result)
+			return
+		}
+
+		if vk.ResetFences(e.gpu_context.device, 1, &frame.in_flight_fence) != .SUCCESS {
+			log_error("Headless: ResetFences failed")
+			return
+		}
+
+		if vk.ResetCommandBuffer(frame.cmds[0], {}) != .SUCCESS {
+			log_error("Headless: Failed to reset command buffer")
+			return
+		}
+
+		aspect := f32(e.swapchain_context.extent.width) / f32(e.swapchain_context.extent.height)
+		proj := linalg.matrix4_perspective_f32(linalg.to_radians(f32(45)), aspect, 0.1, 100.0)
+		proj[1][1] *= -1
+		proj[2][2] = 0.5 * (proj[2][2] - 1.0)
+		proj[3][2] *= 0.5
+		view := linalg.matrix4_look_at_f32(e.camera_eye, e.camera_target, {0, 1, 0})
+
+		if !record_command_buffer(
+			frame.cmds[0],
+			e.swapchain_context.images[image_index],
+			e.swapchain_context.image_views[image_index],
+			e.swapchain_context.depth_image,
+			e.swapchain_context.depth_image_view,
+			e.swapchain_context.extent,
+			e.graphics_pipeline,
+			e.pipeline_layout,
+			e.mesh_pipeline,
+			e.mesh_pipeline_layout,
+			e.cube_vbuf,
+			e.cube_ibuf,
+			frame.descriptor_set,
+			e.frame_commands.clear_color,
+			quad_count,
+			mesh_commands,
+			view,
+			proj,
+		) {
+			log_error("Headless: Failed to record command buffer")
+			return
+		}
+
+		// Record copy commands in a separate command buffer
+		if vk.ResetCommandBuffer(export_res.copy_cmd, {}) != .SUCCESS {
+			log_error("Headless: Failed to reset copy command buffer")
+			return
+		}
+		if !record_copy_commands(
+			export_res.copy_cmd,
+			e.swapchain_context.images[image_index],
+			export_res.staging.handle,
+			e.swapchain_context.extent,
+		) {
+			log_error("Headless: Failed to record copy commands")
+			return
+		}
+
+		// Submit render + copy together so the fence covers both
+		cmds := [2]vk.CommandBuffer{frame.cmds[0], export_res.copy_cmd}
+		wait_stages := vk.PipelineStageFlags{.COLOR_ATTACHMENT_OUTPUT}
+		render_finished_semaphore := e.images[int(image_index)].render_finished_semaphore
+		submit_info := vk.SubmitInfo {
+			sType                = .SUBMIT_INFO,
+			waitSemaphoreCount   = 1,
+			pWaitSemaphores      = &frame.image_available_semaphore,
+			pWaitDstStageMask    = &wait_stages,
+			commandBufferCount   = 2,
+			pCommandBuffers      = &cmds[0],
+			signalSemaphoreCount = 1,
+			pSignalSemaphores    = &render_finished_semaphore,
+		}
+		if vk.QueueSubmit(e.gpu_context.graphics_queue, 1, &submit_info, frame.in_flight_fence) !=
+		   .SUCCESS {
+			log_error("Headless: Failed to submit graphics queue")
+			return
+		}
+
+		// Wait for GPU to finish render + copy
+		vk.WaitForFences(e.gpu_context.device, 1, &frame.in_flight_fence, true, ~u64(0))
+
+		// Read staging buffer and write BMP
+		if !write_bmp(
+			config.output_dir,
+			frame_num,
+			export_res.staging.mapped,
+			e.swapchain_context.extent.width,
+			e.swapchain_context.extent.height,
+		) {
+			log_errorf("Headless: Failed to write frame %d", frame_num)
+			return
+		}
+
+		// Present to release the swapchain image
+		present_info := vk.PresentInfoKHR {
+			sType              = .PRESENT_INFO_KHR,
+			waitSemaphoreCount = 1,
+			pWaitSemaphores    = &render_finished_semaphore,
+			swapchainCount     = 1,
+			pSwapchains        = &e.swapchain_context.handle,
+			pImageIndices      = &image_index,
+		}
+		vk.QueuePresentKHR(e.gpu_context.present_queue, &present_info)
+
+		e.current_frame = (e.current_frame + 1) % MAX_FRAMES_IN_FLIGHT
+		log_infof("Headless: wrote frame %d/%d", frame_num + 1, config.num_frames)
+	}
+
+	vk.DeviceWaitIdle(e.gpu_context.device)
+	log_info("Headless: done")
+}
+
+// -----------------------------------------------------------------------
 // Entry point
 // -----------------------------------------------------------------------
 
@@ -1113,9 +1304,11 @@ main :: proc() {
 	context.allocator = app_allocator
 	context.temp_allocator = frame_allocator
 
+	export_config := parse_frame_export_args()
+
 	e: Engine
 
-	if !init(&e) {
+	if !init(&e, export_config.enabled) {
 		cleanup(&e)
 		return
 	}
@@ -1126,6 +1319,11 @@ main :: proc() {
 		return
 	}
 	defer cleanup_game(&e)
+
+	if export_config.enabled {
+		run_headless_loop(&e, export_config)
+		return
+	}
 
 	e.prev_time = f32(glfw.GetTime())
 
