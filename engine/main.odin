@@ -390,7 +390,7 @@ create_logical_device :: proc(e: ^Engine) -> bool {
 	return true
 }
 
-create_swapchain :: proc(e: ^Engine) -> bool {
+create_swapchain :: proc(e: ^Engine, require_transfer_src: bool = false) -> bool {
 	swapchain_alloc, ok_mem := swapchain_memory_init()
 	if !ok_mem {
 		log_error("Failed to init swapchain memory")
@@ -404,6 +404,7 @@ create_swapchain :: proc(e: ^Engine) -> bool {
 		e.surface,
 		e.queue_family_indices,
 		e.swapchain_allocator,
+		require_transfer_src,
 	)
 	if !ok {
 		swapchain_memory_reset(e.swapchain_allocator)
@@ -755,7 +756,7 @@ init :: proc(e: ^Engine, headless: bool = false) -> bool {
 	if !create_surface(e) do return false
 	if !pick_device(e) do return false
 	if !create_logical_device(e) do return false
-	if !create_swapchain(e) do return false
+	if !create_swapchain(e, headless) do return false
 	if !load_shaders(e) do return false
 	if !create_pipeline_descriptor_layout(e) do return false
 	if !create_pipeline(e) do return false

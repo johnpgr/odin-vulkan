@@ -802,6 +802,7 @@ SwapchainContext :: struct {
 	image_views:  []vk.ImageView,
 	image_format: vk.Format,
 	extent:       vk.Extent2D,
+	supports_transfer_src: bool,
 
 	depth_image:      vk.Image,
 	depth_image_view: vk.ImageView,
@@ -881,6 +882,7 @@ create_swapchain_context :: proc(
 	surface: vk.SurfaceKHR,
 	indices: QueueFamilyIndices,
 	swapchain_allocator: mem.Allocator,
+	require_transfer_src: bool = false,
 ) -> (
 	SwapchainContext,
 	bool,
@@ -937,8 +939,14 @@ create_swapchain_context :: proc(
 		return {}, false
 	}
 
+	transfer_src_supported := .TRANSFER_SRC in capabilities.supportedUsageFlags
+	if require_transfer_src && !transfer_src_supported {
+		log_error("Surface does not support TRANSFER_SRC swapchain images; headless capture disabled")
+		return {}, false
+	}
+
 	image_usage := vk.ImageUsageFlags{.COLOR_ATTACHMENT}
-	if .TRANSFER_SRC in capabilities.supportedUsageFlags {
+	if transfer_src_supported {
 		image_usage += {.TRANSFER_SRC}
 	}
 
@@ -1104,11 +1112,12 @@ create_swapchain_context :: proc(
 	}
 
 	swapchain_context := SwapchainContext {
-		handle       = swapchain,
-		images       = swapchain_images,
-		image_views  = swapchain_image_views,
-		image_format = chosen_format.format,
-		extent       = swap_extent,
+		handle                = swapchain,
+		images                = swapchain_images,
+		image_views           = swapchain_image_views,
+		image_format          = chosen_format.format,
+		extent                = swap_extent,
+		supports_transfer_src = transfer_src_supported,
 		depth_image      = depth_image,
 		depth_image_view = depth_image_view,
 		depth_memory     = depth_memory,
