@@ -62,7 +62,7 @@ create_frame_export_resources :: proc(
 
 	// Staging buffer: width * height * 4 bytes (BGRA)
 	data_size := vk.DeviceSize(extent.width) * vk.DeviceSize(extent.height) * 4
-	staging, ok_staging := create_mapped_buffer(device, physical_device, {.TRANSFER_DST}, data_size)
+	staging, ok_staging := create_mapped_buffer(device, physical_device, data_size, {.TRANSFER_DST})
 	if !ok_staging {
 		log_error("Failed to create frame export staging buffer")
 		return {}, false

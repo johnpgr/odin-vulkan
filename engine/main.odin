@@ -1256,11 +1256,11 @@ run_headless_loop :: proc(e: ^Engine, config: Frame_Export_Config) {
 		clear(&e.frame_commands.meshes)
 
 		app_callback_context = App_Callback_Context {
-			commands      = &e.frame_commands,
-			window        = e.window,
-			dt            = simulated_dt,
-			camera_eye    = &e.camera_eye,
-			camera_target = &e.camera_target,
+			commands        = &e.frame_commands,
+			window          = e.window,
+			dt              = simulated_dt,
+			engine          = e,
+			allow_mesh_load = false,
 		}
 
 		if e.game_module.is_loaded {
@@ -1319,24 +1319,23 @@ run_headless_loop :: proc(e: ^Engine, config: Frame_Export_Config) {
 		view := linalg.matrix4_look_at_f32(e.camera_eye, e.camera_target, {0, 1, 0})
 
 		if !record_command_buffer(
-			frame.cmds[0],
-			e.swapchain_context.images[image_index],
-			e.swapchain_context.image_views[image_index],
-			e.swapchain_context.depth_image,
-			e.swapchain_context.depth_image_view,
-			e.swapchain_context.extent,
-			e.graphics_pipeline,
-			e.pipeline_layout,
-			e.mesh_pipeline,
-			e.mesh_pipeline_layout,
-			e.cube_vbuf,
-			e.cube_ibuf,
-			frame.descriptor_set,
-			e.frame_commands.clear_color,
-			quad_count,
-			mesh_commands,
-			view,
-			proj,
+			cmd = frame.cmds[0],
+			swapchain_image = e.swapchain_context.images[image_index],
+			image_view = e.swapchain_context.image_views[image_index],
+			depth_image = e.swapchain_context.depth_image,
+			depth_image_view = e.swapchain_context.depth_image_view,
+			extent = e.swapchain_context.extent,
+			pipeline = e.graphics_pipeline,
+			layout = e.pipeline_layout,
+			mesh_pipeline = e.mesh_pipeline,
+			mesh_layout = e.mesh_pipeline_layout,
+			meshes = &e.meshes,
+			descriptor_set = frame.descriptor_set,
+			clear_color = e.frame_commands.clear_color,
+			quad_count = quad_count,
+			mesh_commands = mesh_commands,
+			view_matrix = view,
+			proj_matrix = proj,
 		) {
 			log_error("Headless: Failed to record command buffer")
 			return
