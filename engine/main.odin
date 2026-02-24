@@ -14,11 +14,11 @@ import shared "../shared"
 // -----------------------------------------------------------------------
 
 App_Callback_Context :: struct {
-	commands:      ^Frame_Commands,
-	window:        glfw.WindowHandle,
-	dt:            f32,
-	camera_eye:    ^vec3,
-	camera_target: ^vec3,
+	commands:        ^Frame_Commands,
+	window:          glfw.WindowHandle,
+	dt:              f32,
+	engine:          ^Engine,
+	allow_mesh_load: bool,
 }
 
 @(private)
@@ -43,23 +43,118 @@ engine_set_clear_color :: proc(r, g, b, a: f32) {
 }
 
 engine_set_camera :: proc(ex, ey, ez, tx, ty, tz: f32) {
-	if app_callback_context.camera_eye == nil || app_callback_context.camera_target == nil {
+	if app_callback_context.engine == nil {
 		return
 	}
 
-	app_callback_context.camera_eye^ = {ex, ey, ez}
-	app_callback_context.camera_target^ = {tx, ty, tz}
+	app_callback_context.engine.camera_eye = {ex, ey, ez}
+	app_callback_context.engine.camera_target = {tx, ty, tz}
 }
 
-engine_draw_cube :: proc(model: mat4, r, g, b, a: f32) {
+engine_load_mesh :: proc(path: cstring) -> shared.Mesh_Handle {
+	e := app_callback_context.engine
+	if e == nil {
+		return shared.CUBE_MESH
+	}
+
+	if !app_callback_context.allow_mesh_load {
+		log_warn("load_mesh is only allowed during game_load")
+		return shared.CUBE_MESH
+	}
+
+	if e.next_mesh_slot >= MAX_MESHES {
+		log_error("Mesh slots full")
+		return shared.CUBE_MESH
+	}
+
+	path_text := "<nil>"
+	if path != nil {
+		path_text = string(path)
+	} else {
+		log_error("load_mesh called with nil path")
+		return shared.CUBE_MESH
+	}
+
+	vertices, indices, ok := load_gltf_mesh(path)
+	if !ok || len(vertices) == 0 || len(indices) == 0 {
+		log_errorf("Failed to load mesh: %s", path_text)
+		return shared.CUBE_MESH
+	}
+
+	slot := e.next_mesh_slot
+	slot_index := int(slot)
+
+	vbuf, ok_vbuf := create_device_local_buffer(
+		e.gpu_context.device,
+		e.physical_device,
+		e.frames[0].command_pools[0],
+		e.gpu_context.graphics_queue,
+		raw_data(vertices),
+		vk.DeviceSize(len(vertices) * size_of(Mesh_Vertex)),
+		{.VERTEX_BUFFER},
+	)
+	if !ok_vbuf {
+		log_errorf("Failed to upload mesh vertex buffer: %s", path_text)
+		return shared.CUBE_MESH
+	}
+
+	ibuf, ok_ibuf := create_device_local_buffer(
+		e.gpu_context.device,
+		e.physical_device,
+		e.frames[0].command_pools[0],
+		e.gpu_context.graphics_queue,
+		raw_data(indices),
+		vk.DeviceSize(len(indices) * size_of(u32)),
+		{.INDEX_BUFFER},
+	)
+	if !ok_ibuf {
+		destroy_gpu_buffer(e.gpu_context.device, &vbuf)
+		log_errorf("Failed to upload mesh index buffer: %s", path_text)
+		return shared.CUBE_MESH
+	}
+
+	e.meshes[slot_index] = Gpu_Mesh {
+		vbuf         = vbuf,
+		ibuf         = ibuf,
+		index_count  = u32(len(indices)),
+		vertex_count = u32(len(vertices)),
+		loaded       = true,
+	}
+	e.next_mesh_slot += 1
+
+	return shared.Mesh_Handle(slot)
+}
+
+engine_draw_mesh :: proc(handle: shared.Mesh_Handle, model: mat4, r, g, b, a: f32) {
+	engine_draw_mesh_blend(handle, model, r, g, b, a, 1.0)
+}
+
+engine_draw_mesh_blend :: proc(handle: shared.Mesh_Handle, model: mat4, r, g, b, a, tint_strength: f32) {
 	if app_callback_context.commands == nil {
 		return
 	}
 
+	strength := tint_strength
+	if strength < 0 {
+		strength = 0
+	} else if strength > 1 {
+		strength = 1
+	}
+
 	append(&app_callback_context.commands.meshes, Mesh_Command {
-		model = model,
-		color = {r, g, b, a},
+		mesh          = handle,
+		model         = model,
+		color         = {r, g, b, a},
+		tint_strength = strength,
 	})
+}
+
+engine_draw_mesh_raw_material :: proc(handle: shared.Mesh_Handle, model: mat4) {
+	engine_draw_mesh_blend(handle, model, 1.0, 1.0, 1.0, 1.0, 0.0)
+}
+
+engine_draw_cube :: proc(model: mat4, r, g, b, a: f32) {
+	engine_draw_mesh(shared.CUBE_MESH, model, r, g, b, a)
 }
 
 engine_log :: proc(message: string) {
@@ -83,6 +178,10 @@ make_engine_api :: proc() -> shared.Engine_API {
 		draw_quad       = engine_draw_quad,
 		set_clear_color = engine_set_clear_color,
 		set_camera      = engine_set_camera,
+		load_mesh       = engine_load_mesh,
+		draw_mesh       = engine_draw_mesh,
+		draw_mesh_blend = engine_draw_mesh_blend,
+		draw_mesh_raw_material = engine_draw_mesh_raw_material,
 		draw_cube       = engine_draw_cube,
 		log             = engine_log,
 		get_dt          = engine_get_dt,
@@ -164,8 +263,8 @@ Engine :: struct {
 	mesh_shader_stages:   [2]vk.PipelineShaderStageCreateInfo,
 	mesh_pipeline_layout: vk.PipelineLayout,
 	mesh_pipeline:        vk.Pipeline,
-	cube_vbuf:            Gpu_Buffer,
-	cube_ibuf:            Gpu_Buffer,
+	meshes:               [MAX_MESHES]Gpu_Mesh,
+	next_mesh_slot:       u32,
 	camera_eye:           vec3,
 	camera_target:        vec3,
 
@@ -193,7 +292,7 @@ Engine :: struct {
 // Vulkan init steps (mirrors Vulkan Tutorial's initVulkan pattern)
 // -----------------------------------------------------------------------
 
-init_window :: proc(e: ^Engine) -> bool {
+init_window :: proc(e: ^Engine, headless: bool = false) -> bool {
 	if !glfw.Init() {
 		log_error("glfwInit failed")
 		return false
@@ -208,6 +307,9 @@ init_window :: proc(e: ^Engine) -> bool {
 
 	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
 	glfw.WindowHint(glfw.RESIZABLE, glfw.TRUE)
+	if headless {
+		glfw.WindowHint(glfw.VISIBLE, glfw.FALSE)
+	}
 	e.window = glfw.CreateWindow(1280, 720, "Learning Vulkan", nil, nil)
 	if e.window == nil {
 		log_error("Failed to create a window")
@@ -306,7 +408,7 @@ create_logical_device :: proc(e: ^Engine) -> bool {
 	return true
 }
 
-create_swapchain :: proc(e: ^Engine) -> bool {
+create_swapchain :: proc(e: ^Engine, require_transfer_src: bool = false) -> bool {
 	swapchain_alloc, ok_mem := swapchain_memory_init()
 	if !ok_mem {
 		log_error("Failed to init swapchain memory")
@@ -320,6 +422,7 @@ create_swapchain :: proc(e: ^Engine) -> bool {
 		e.surface,
 		e.queue_family_indices,
 		e.swapchain_allocator,
+		require_transfer_src,
 	)
 	if !ok {
 		swapchain_memory_reset(e.swapchain_allocator)
@@ -453,24 +556,46 @@ create_mesh_resources :: proc(e: ^Engine) -> bool {
 	e.mesh_pipeline_layout = mesh_layout
 	e.mesh_pipeline = mesh_pipeline
 
-	cube_vertices := [8]Mesh_Vertex{
-		{pos = {-0.5, -0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {+0.5, -0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {+0.5, +0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {-0.5, +0.5, -0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {-0.5, -0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {+0.5, -0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {+0.5, +0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
-		{pos = {-0.5, +0.5, +0.5}, color = {1.0, 1.0, 1.0, 1.0}},
+	cube_vertices := [24]Mesh_Vertex{
+		// Front (+Z)
+		{pos = {-0.5, -0.5, +0.5}, normal = {0, 0, 1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, -0.5, +0.5}, normal = {0, 0, 1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, +0.5}, normal = {0, 0, 1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, +0.5}, normal = {0, 0, 1}, color = {1.0, 1.0, 1.0, 1.0}},
+		// Back (-Z)
+		{pos = {+0.5, -0.5, -0.5}, normal = {0, 0, -1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, -0.5, -0.5}, normal = {0, 0, -1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, -0.5}, normal = {0, 0, -1}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, -0.5}, normal = {0, 0, -1}, color = {1.0, 1.0, 1.0, 1.0}},
+		// Right (+X)
+		{pos = {+0.5, -0.5, +0.5}, normal = {1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, -0.5, -0.5}, normal = {1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, -0.5}, normal = {1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, +0.5}, normal = {1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		// Left (-X)
+		{pos = {-0.5, -0.5, -0.5}, normal = {-1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, -0.5, +0.5}, normal = {-1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, +0.5}, normal = {-1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, -0.5}, normal = {-1, 0, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		// Top (+Y)
+		{pos = {-0.5, +0.5, +0.5}, normal = {0, 1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, +0.5}, normal = {0, 1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, +0.5, -0.5}, normal = {0, 1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, +0.5, -0.5}, normal = {0, 1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		// Bottom (-Y)
+		{pos = {-0.5, -0.5, -0.5}, normal = {0, -1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, -0.5, -0.5}, normal = {0, -1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {+0.5, -0.5, +0.5}, normal = {0, -1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
+		{pos = {-0.5, -0.5, +0.5}, normal = {0, -1, 0}, color = {1.0, 1.0, 1.0, 1.0}},
 	}
 
-	cube_indices := [36]u16{
+	cube_indices := [36]u32{
+		0, 1, 2, 0, 2, 3,
 		4, 5, 6, 4, 6, 7,
-		1, 0, 3, 1, 3, 2,
-		5, 1, 2, 5, 2, 6,
-		0, 4, 7, 0, 7, 3,
-		3, 6, 2, 3, 7, 6,
-		4, 1, 5, 4, 0, 1,
+		8, 9, 10, 8, 10, 11,
+		12, 13, 14, 12, 14, 15,
+		16, 17, 18, 16, 18, 19,
+		20, 21, 22, 20, 22, 23,
 	}
 
 	cube_vbuf, ok_cube_vbuf := create_device_local_buffer(
@@ -490,7 +615,6 @@ create_mesh_resources :: proc(e: ^Engine) -> bool {
 		e.mesh_pipeline_layout = 0
 		return false
 	}
-	e.cube_vbuf = cube_vbuf
 
 	cube_ibuf, ok_cube_ibuf := create_device_local_buffer(
 		e.gpu_context.device,
@@ -503,14 +627,22 @@ create_mesh_resources :: proc(e: ^Engine) -> bool {
 	)
 	if !ok_cube_ibuf {
 		log_error("Failed to create cube index buffer")
-		destroy_gpu_buffer(e.gpu_context.device, &e.cube_vbuf)
+		destroy_gpu_buffer(e.gpu_context.device, &cube_vbuf)
 		vk.DestroyPipeline(e.gpu_context.device, e.mesh_pipeline, nil)
 		vk.DestroyPipelineLayout(e.gpu_context.device, e.mesh_pipeline_layout, nil)
 		e.mesh_pipeline = 0
 		e.mesh_pipeline_layout = 0
 		return false
 	}
-	e.cube_ibuf = cube_ibuf
+
+	e.meshes[int(cast(u32)shared.CUBE_MESH)] = Gpu_Mesh {
+		vbuf         = cube_vbuf,
+		ibuf         = cube_ibuf,
+		index_count  = u32(len(cube_indices)),
+		vertex_count = u32(len(cube_vertices)),
+		loaded       = true,
+	}
+	e.next_mesh_slot = 1
 
 	e.camera_eye = {0, 3, 6}
 	e.camera_target = {0, 0, 0}
@@ -636,13 +768,13 @@ create_sync_objects :: proc(e: ^Engine) -> bool {
 
 // init initialises the window and every Vulkan object the engine
 // needs, in the same sequential order as the Vulkan Tutorial's initVulkan().
-init :: proc(e: ^Engine) -> bool {
-	if !init_window(e) do return false
+init :: proc(e: ^Engine, headless: bool = false) -> bool {
+	if !init_window(e, headless) do return false
 	if !create_instance(e) do return false
 	if !create_surface(e) do return false
 	if !pick_device(e) do return false
 	if !create_logical_device(e) do return false
-	if !create_swapchain(e) do return false
+	if !create_swapchain(e, headless) do return false
 	if !load_shaders(e) do return false
 	if !create_pipeline_descriptor_layout(e) do return false
 	if !create_pipeline(e) do return false
@@ -656,8 +788,8 @@ init :: proc(e: ^Engine) -> bool {
 		quads       = make([dynamic]Quad_Command, context.allocator),
 		meshes      = make([dynamic]Mesh_Command, context.allocator),
 	}
-	app_callback_context.camera_eye = &e.camera_eye
-	app_callback_context.camera_target = &e.camera_target
+	app_callback_context.engine = e
+	app_callback_context.allow_mesh_load = false
 
 	return true
 }
@@ -679,8 +811,13 @@ cleanup :: proc(e: ^Engine) {
 		for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
 			destroy_mapped_buffer(e.gpu_context.device, &e.frames[i].quad_ssbo)
 		}
-		destroy_gpu_buffer(e.gpu_context.device, &e.cube_vbuf)
-		destroy_gpu_buffer(e.gpu_context.device, &e.cube_ibuf)
+		for i in 0 ..< MAX_MESHES {
+			if e.meshes[i].loaded {
+				destroy_gpu_buffer(e.gpu_context.device, &e.meshes[i].vbuf)
+				destroy_gpu_buffer(e.gpu_context.device, &e.meshes[i].ibuf)
+				e.meshes[i] = {}
+			}
+		}
 		if e.descriptor_pool != 0 {
 			vk.DestroyDescriptorPool(e.gpu_context.device, e.descriptor_pool, nil)
 		}
@@ -745,7 +882,13 @@ init_game :: proc(e: ^Engine) -> bool {
 	}
 
 	e.game_memory = make([]byte, game_memory_size, context.allocator)
+	app_callback_context = App_Callback_Context {
+		engine          = e,
+		window          = e.window,
+		allow_mesh_load = true,
+	}
 	e.game_module.api.load(&e.engine_api, raw_data(e.game_memory), len(e.game_memory))
+	app_callback_context.allow_mesh_load = false
 	return true
 }
 
@@ -795,11 +938,11 @@ run_main_loop :: proc(e: ^Engine) {
 			e.prev_time = now
 
 			app_callback_context = App_Callback_Context {
-				commands      = &e.frame_commands,
-				window        = e.window,
-				dt            = dt,
-				camera_eye    = &e.camera_eye,
-				camera_target = &e.camera_target,
+				commands        = &e.frame_commands,
+				window          = e.window,
+				dt              = dt,
+				engine          = e,
+				allow_mesh_load = false,
 			}
 
 			// Hot-reload check
@@ -963,8 +1106,7 @@ run_main_loop :: proc(e: ^Engine) {
 				e.pipeline_layout,
 				e.mesh_pipeline,
 				e.mesh_pipeline_layout,
-				e.cube_vbuf,
-				e.cube_ibuf,
+				&e.meshes,
 				frame.descriptor_set,
 				e.frame_commands.clear_color,
 				quad_count,
@@ -1101,6 +1243,205 @@ run_main_loop :: proc(e: ^Engine) {
 }
 
 // -----------------------------------------------------------------------
+// Headless frame capture loop (single-threaded, no input)
+// -----------------------------------------------------------------------
+
+run_headless_loop :: proc(e: ^Engine, config: Frame_Export_Config) {
+	log_infof(
+		"Headless: capturing %d frame(s) to %s/",
+		config.num_frames,
+		config.output_dir,
+	)
+
+	os.make_directory(config.output_dir)
+
+	export_res, ok_export := create_frame_export_resources(
+		e.gpu_context.device,
+		e.physical_device,
+		e.frames[0].command_pools[0],
+		e.swapchain_context.extent,
+	)
+	if !ok_export {
+		log_error("Failed to create frame export resources")
+		return
+	}
+	defer destroy_frame_export_resources(e.gpu_context.device, &export_res)
+
+	simulated_dt: f32 = 1.0 / 60.0
+
+	for frame_num in 0 ..< config.num_frames {
+		free_all(context.temp_allocator)
+		clear(&e.frame_commands.quads)
+		clear(&e.frame_commands.meshes)
+
+		app_callback_context = App_Callback_Context {
+			commands        = &e.frame_commands,
+			window          = e.window,
+			dt              = simulated_dt,
+			engine          = e,
+			allow_mesh_load = false,
+		}
+
+		if e.game_module.is_loaded {
+			e.game_module.api.update(
+				&e.engine_api,
+				raw_data(e.game_memory),
+				len(e.game_memory),
+			)
+		}
+
+		quad_count := min(len(e.frame_commands.quads), MAX_QUADS)
+		mesh_commands := e.frame_commands.meshes[:]
+		frame := &e.frames[int(e.current_frame)]
+
+		// Wait for previous use of this frame slot
+		vk.WaitForFences(e.gpu_context.device, 1, &frame.in_flight_fence, true, ~u64(0))
+
+		if quad_count > 0 {
+			mem.copy(
+				frame.quad_ssbo.mapped,
+				raw_data(e.frame_commands.quads),
+				quad_count * size_of(Quad_Command),
+			)
+		}
+
+		// Acquire swapchain image
+		image_index: u32
+		acquire_result := vk.AcquireNextImageKHR(
+			e.gpu_context.device,
+			e.swapchain_context.handle,
+			~u64(0),
+			frame.image_available_semaphore,
+			vk.Fence(0),
+			&image_index,
+		)
+		if acquire_result != .SUCCESS && acquire_result != .SUBOPTIMAL_KHR {
+			log_errorf("Headless: AcquireNextImageKHR failed: %v", acquire_result)
+			return
+		}
+
+		if vk.ResetFences(e.gpu_context.device, 1, &frame.in_flight_fence) != .SUCCESS {
+			log_error("Headless: ResetFences failed")
+			return
+		}
+
+		if vk.ResetCommandBuffer(frame.cmds[0], {}) != .SUCCESS {
+			log_error("Headless: Failed to reset command buffer")
+			return
+		}
+
+		aspect := f32(e.swapchain_context.extent.width) / f32(e.swapchain_context.extent.height)
+		proj := linalg.matrix4_perspective_f32(linalg.to_radians(f32(45)), aspect, 0.1, 100.0)
+		proj[1][1] *= -1
+		proj[2][2] = 0.5 * (proj[2][2] - 1.0)
+		proj[3][2] *= 0.5
+		view := linalg.matrix4_look_at_f32(e.camera_eye, e.camera_target, {0, 1, 0})
+
+		if !record_command_buffer(
+			cmd = frame.cmds[0],
+			swapchain_image = e.swapchain_context.images[image_index],
+			image_view = e.swapchain_context.image_views[image_index],
+			depth_image = e.swapchain_context.depth_image,
+			depth_image_view = e.swapchain_context.depth_image_view,
+			extent = e.swapchain_context.extent,
+			pipeline = e.graphics_pipeline,
+			layout = e.pipeline_layout,
+			mesh_pipeline = e.mesh_pipeline,
+			mesh_layout = e.mesh_pipeline_layout,
+			meshes = &e.meshes,
+			descriptor_set = frame.descriptor_set,
+			clear_color = e.frame_commands.clear_color,
+			quad_count = quad_count,
+			mesh_commands = mesh_commands,
+			view_matrix = view,
+			proj_matrix = proj,
+		) {
+			log_error("Headless: Failed to record command buffer")
+			return
+		}
+
+		// Record copy commands in a separate command buffer
+		if vk.ResetCommandBuffer(export_res.copy_cmd, {}) != .SUCCESS {
+			log_error("Headless: Failed to reset copy command buffer")
+			return
+		}
+		if !record_copy_commands(
+			export_res.copy_cmd,
+			e.swapchain_context.images[image_index],
+			export_res.staging.handle,
+			e.swapchain_context.extent,
+		) {
+			log_error("Headless: Failed to record copy commands")
+			return
+		}
+
+		// Submit render + copy together so the fence covers both
+		cmds := [2]vk.CommandBuffer{frame.cmds[0], export_res.copy_cmd}
+		wait_stages := vk.PipelineStageFlags{.COLOR_ATTACHMENT_OUTPUT}
+		render_finished_semaphore := e.images[int(image_index)].render_finished_semaphore
+		submit_info := vk.SubmitInfo {
+			sType                = .SUBMIT_INFO,
+			waitSemaphoreCount   = 1,
+			pWaitSemaphores      = &frame.image_available_semaphore,
+			pWaitDstStageMask    = &wait_stages,
+			commandBufferCount   = 2,
+			pCommandBuffers      = &cmds[0],
+			signalSemaphoreCount = 1,
+			pSignalSemaphores    = &render_finished_semaphore,
+		}
+		if vk.QueueSubmit(e.gpu_context.graphics_queue, 1, &submit_info, frame.in_flight_fence) !=
+		   .SUCCESS {
+			log_error("Headless: Failed to submit graphics queue")
+			return
+		}
+
+		// Wait for GPU to finish render + copy
+		vk.WaitForFences(e.gpu_context.device, 1, &frame.in_flight_fence, true, ~u64(0))
+
+		// Read staging buffer and write BMP
+		if !write_bmp(
+			config.output_dir,
+			frame_num,
+			export_res.staging.mapped,
+			e.swapchain_context.extent.width,
+			e.swapchain_context.extent.height,
+		) {
+			log_errorf("Headless: Failed to write frame %d", frame_num)
+			return
+		}
+
+		// Present to release the swapchain image
+		present_info := vk.PresentInfoKHR {
+			sType              = .PRESENT_INFO_KHR,
+			waitSemaphoreCount = 1,
+			pWaitSemaphores    = &render_finished_semaphore,
+			swapchainCount     = 1,
+			pSwapchains        = &e.swapchain_context.handle,
+			pImageIndices      = &image_index,
+		}
+		present_result := vk.QueuePresentKHR(e.gpu_context.present_queue, &present_info)
+		#partial switch present_result {
+		case .SUCCESS:
+		case .SUBOPTIMAL_KHR, .ERROR_OUT_OF_DATE_KHR:
+			log_errorf("Headless: QueuePresentKHR requires swapchain recreate: %v", present_result)
+			return
+		case .ERROR_DEVICE_LOST:
+			log_error("Headless: Device lost in QueuePresentKHR")
+			return
+		case:
+			log_errorf("Headless: QueuePresentKHR failed: %v", present_result)
+			return
+		}
+
+		e.current_frame = (e.current_frame + 1) % MAX_FRAMES_IN_FLIGHT
+		log_infof("Headless: wrote frame %d/%d", frame_num + 1, config.num_frames)
+	}
+
+	vk.DeviceWaitIdle(e.gpu_context.device)
+	log_info("Headless: done")
+}
+
+// -----------------------------------------------------------------------
 // Entry point
 // -----------------------------------------------------------------------
 
@@ -1113,9 +1454,11 @@ main :: proc() {
 	context.allocator = app_allocator
 	context.temp_allocator = frame_allocator
 
+	export_config := parse_frame_export_args()
+
 	e: Engine
 
-	if !init(&e) {
+	if !init(&e, export_config.enabled) {
 		cleanup(&e)
 		return
 	}
@@ -1126,6 +1469,11 @@ main :: proc() {
 		return
 	}
 	defer cleanup_game(&e)
+
+	if export_config.enabled {
+		run_headless_loop(&e, export_config)
+		return
+	}
 
 	e.prev_time = f32(glfw.GetTime())
 

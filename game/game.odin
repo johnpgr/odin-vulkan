@@ -6,9 +6,11 @@ import "core:math/linalg"
 Game_State :: struct {
 	time:         f32,
 	reload_count: u32,
-	clear_hue:    f32,
 
 	world: World,
+
+	tree_mesh: shared.Mesh_Handle,
+	rock_mesh: shared.Mesh_Handle,
 }
 
 get_state :: proc(memory: rawptr, memory_size: int) -> (^Game_State, bool) {
@@ -37,6 +39,8 @@ game_load :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
 	}
 
 	state^ = {}
+	state.tree_mesh = api.load_mesh(cast(cstring)"assets/tree.glb")
+	state.rock_mesh = api.load_mesh(cast(cstring)"assets/rock.glb")
 	api.log("game_load")
 }
 
@@ -76,9 +80,18 @@ game_update :: proc(api: ^shared.Engine_API, memory: rawptr, memory_size: int) {
 	state.time += dt
 
 	api.set_clear_color(0.53, 0.81, 0.92, 1.0)
-	api.set_camera(0, 3, 6, 0, 0, 0)
+	api.set_camera(0, 5, 10, 0, 0, 0)
 
 	angle := state.time
-	model := linalg.matrix4_rotate_f32(angle, {0, 1, 0})
-	api.draw_cube(model, 0.8, 0.4, 0.2, 1.0)
+	cube_model := linalg.matrix4_rotate_f32(angle, {0, 1, 0})
+	api.draw_cube(cube_model, 0.8, 0.4, 0.2, 1.0)
+
+	tree_model := linalg.matrix4_translate_f32({3, 0, 0})
+	api.draw_mesh_raw_material(state.tree_mesh, tree_model)
+
+	for i in 0 ..< 3 {
+		pos := vec3{f32(i) * 2 - 2, 0, -3}
+		rock_model := linalg.matrix4_translate_f32(pos)
+		api.draw_mesh_blend(state.rock_mesh, rock_model, 0.6, 0.6, 0.6, 1.0, 0.7)
+	}
 }

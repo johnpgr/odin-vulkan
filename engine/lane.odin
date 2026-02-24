@@ -6,29 +6,29 @@ import "core:thread"
 MAX_LANES :: 4
 
 @(thread_local)
-_lane_idx: int
+lane_idx: int
 
 @(private)
-_num_lanes: int
+num_lanes: int
 
 @(private)
-_lane_barrier: sync.Barrier
+lane_barrier: sync.Barrier
 
 Lane_Range :: struct {
 	min, max: int,
 }
 
 lane_idx :: #force_inline proc() -> int {
-	return _lane_idx
+	return lane_idx
 }
 
 lane_count :: proc() -> int {
-	return _num_lanes
+	return num_lanes
 }
 
 lane_range :: proc(total: int) -> Lane_Range {
-	n := _num_lanes
-	idx := _lane_idx
+	n := num_lanes
+	idx := lane_idx
 	chunk := total / n
 	rem := total % n
 	lo := idx * chunk + min(idx, rem)
@@ -37,17 +37,17 @@ lane_range :: proc(total: int) -> Lane_Range {
 }
 
 lane_sync :: proc() {
-	sync.barrier_wait(&_lane_barrier)
+	sync.barrier_wait(&lane_barrier)
 }
 
 lane_init :: proc(n: int) {
-	_num_lanes = n
-	sync.barrier_init(&_lane_barrier, n)
+	num_lanes = n
+	sync.barrier_init(&lane_barrier, n)
 }
 
 @(private)
 engine_thread_proc :: proc(t: ^thread.Thread) {
-	_lane_idx = t.user_index
+	lane_idx = t.user_index
 	e := cast(^Engine)t.data
 	run_main_loop(e)
 }

@@ -21,12 +21,13 @@ foreign vulkan {
 }
 
 MAX_QUADS :: 4096
+MAX_MESHES :: 64
 
 Cmd_Pipeline_Barrier2_Proc :: #type type_of(vk.CmdPipelineBarrier2)
 Cmd_Begin_Rendering_Proc :: #type type_of(vk.CmdBeginRendering)
 Cmd_End_Rendering_Proc :: #type type_of(vk.CmdEndRendering)
 
-@(private)
+@(private = "package")
 vkCmdPipelineBarrier2: Cmd_Pipeline_Barrier2_Proc
 
 @(private)
@@ -801,6 +802,7 @@ SwapchainContext :: struct {
 	image_views:  []vk.ImageView,
 	image_format: vk.Format,
 	extent:       vk.Extent2D,
+	supports_transfer_src: bool,
 
 	depth_image:      vk.Image,
 	depth_image_view: vk.ImageView,
@@ -837,18 +839,30 @@ Quad_Command :: struct {
 }
 
 Mesh_Vertex :: struct {
-	pos:   vec3,
-	color: vec4,
+	pos:    vec3,
+	normal: vec3,
+	color:  vec4,
 }
 
 Mesh_Command :: struct {
-	model: mat4,
-	color: vec4,
+	mesh:          Mesh_Handle,
+	model:         mat4,
+	color:         vec4,
+	tint_strength: f32,
 }
 
 Mesh_Push_Constants :: struct {
-	mvp:   mat4,
-	color: vec4,
+	mvp:        mat4,
+	color:      vec4,
+	tint_param: vec4,
+}
+
+Gpu_Mesh :: struct {
+	vbuf:         Gpu_Buffer,
+	ibuf:         Gpu_Buffer,
+	index_count:  u32,
+	vertex_count: u32,
+	loaded:       bool,
 }
 
 Frame_Commands :: struct {
@@ -870,6 +884,7 @@ create_swapchain_context :: proc(
 	surface: vk.SurfaceKHR,
 	indices: QueueFamilyIndices,
 	swapchain_allocator: mem.Allocator,
+	require_transfer_src: bool = false,
 ) -> (
 	SwapchainContext,
 	bool,
@@ -926,12 +941,18 @@ create_swapchain_context :: proc(
 		return {}, false
 	}
 
+	transfer_src_supported := .TRANSFER_SRC in capabilities.supportedUsageFlags
+	if require_transfer_src && !transfer_src_supported {
+		log_error("Surface does not support TRANSFER_SRC swapchain images; headless capture disabled")
+		return {}, false
+	}
+
 	image_usage := vk.ImageUsageFlags{.COLOR_ATTACHMENT}
+	if transfer_src_supported {
+		image_usage += {.TRANSFER_SRC}
+	}
 
 	validation_usage := image_usage
-	if .TRANSFER_SRC in capabilities.supportedUsageFlags {
-		validation_usage += {.TRANSFER_SRC}
-	}
 	if .STORAGE in capabilities.supportedUsageFlags {
 		validation_usage += {.STORAGE}
 	}
@@ -1093,11 +1114,12 @@ create_swapchain_context :: proc(
 	}
 
 	swapchain_context := SwapchainContext {
-		handle       = swapchain,
-		images       = swapchain_images,
-		image_views  = swapchain_image_views,
-		image_format = chosen_format.format,
-		extent       = swap_extent,
+		handle                = swapchain,
+		images                = swapchain_images,
+		image_views           = swapchain_image_views,
+		image_format          = chosen_format.format,
+		extent                = swap_extent,
+		supports_transfer_src = transfer_src_supported,
 		depth_image      = depth_image,
 		depth_image_view = depth_image_view,
 		depth_memory     = depth_memory,
@@ -1252,8 +1274,7 @@ record_command_buffer :: proc(
 	layout: vk.PipelineLayout,
 	mesh_pipeline: vk.Pipeline,
 	mesh_layout: vk.PipelineLayout,
-	cube_vbuf: Gpu_Buffer,
-	cube_ibuf: Gpu_Buffer,
+	meshes: ^[MAX_MESHES]Gpu_Mesh,
 	descriptor_set: vk.DescriptorSet,
 	clear_color: vec4,
 	quad_count: int,
@@ -1365,17 +1386,32 @@ record_command_buffer :: proc(
 
 	if len(mesh_commands) > 0 {
 		vk.CmdBindPipeline(cmd, .GRAPHICS, mesh_pipeline)
-
-		vbuf := cube_vbuf.handle
-		vbuf_offset: vk.DeviceSize = 0
-		vk.CmdBindVertexBuffers(cmd, 0, 1, &vbuf, &vbuf_offset)
-		vk.CmdBindIndexBuffer(cmd, cube_ibuf.handle, 0, .UINT16)
+		last_mesh := -1
 
 		for mesh_cmd in mesh_commands {
+			mesh_index := int(cast(u32)mesh_cmd.mesh)
+			if mesh_index < 0 || mesh_index >= MAX_MESHES {
+				continue
+			}
+
+			gpu_mesh := &meshes[mesh_index]
+			if !gpu_mesh.loaded || gpu_mesh.index_count == 0 {
+				continue
+			}
+
+			if last_mesh != mesh_index {
+				vbuf := gpu_mesh.vbuf.handle
+				vbuf_offset: vk.DeviceSize = 0
+				vk.CmdBindVertexBuffers(cmd, 0, 1, &vbuf, &vbuf_offset)
+				vk.CmdBindIndexBuffer(cmd, gpu_mesh.ibuf.handle, 0, .UINT32)
+				last_mesh = mesh_index
+			}
+
 			mvp := proj_matrix * view_matrix * mesh_cmd.model
 			push := Mesh_Push_Constants {
-				mvp   = mvp,
-				color = mesh_cmd.color,
+				mvp        = mvp,
+				color      = mesh_cmd.color,
+				tint_param = {mesh_cmd.tint_strength, 0, 0, 0},
 			}
 			vk.CmdPushConstants(
 				cmd,
@@ -1385,7 +1421,7 @@ record_command_buffer :: proc(
 				u32(size_of(Mesh_Push_Constants)),
 				&push,
 			)
-			vk.CmdDrawIndexed(cmd, 36, 1, 0, 0, 0)
+			vk.CmdDrawIndexed(cmd, gpu_mesh.index_count, 1, 0, 0, 0)
 		}
 	}
 
@@ -1607,7 +1643,7 @@ create_mesh_pipeline :: proc(
 		stride    = size_of(Mesh_Vertex),
 		inputRate = .VERTEX,
 	}
-	vertex_attributes := [2]vk.VertexInputAttributeDescription{
+	vertex_attributes := [3]vk.VertexInputAttributeDescription{
 		{
 			location = 0,
 			binding  = 0,
@@ -1617,8 +1653,14 @@ create_mesh_pipeline :: proc(
 		{
 			location = 1,
 			binding  = 0,
-			format   = .R32G32B32A32_SFLOAT,
+			format   = .R32G32B32_SFLOAT,
 			offset   = size_of(vec3),
+		},
+		{
+			location = 2,
+			binding  = 0,
+			format   = .R32G32B32A32_SFLOAT,
+			offset   = size_of(vec3) * 2,
 		},
 	}
 
